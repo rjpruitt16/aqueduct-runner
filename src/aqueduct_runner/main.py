@@ -38,13 +38,13 @@ _SUITE_FILES = [
 ]
 
 # Aquifer's drain mode is proven to work end-to-end (confirmed passing at
-# 5m10s). ezthrottle-local's currently cannot -- a confirmed, permanent
-# bug (two independent always-on heartbeats each block their own owning
-# process's idle-timeout from ever elapsing; see
-# test_drain_ledger_ezthrottle.hurl's header for the full citation), not a
-# timing difference -- so it gets its own file with a short, honest
-# "expected to fail" budget instead of an ever-growing retry count that
-# can never actually pass.
+# 5m10s). ezthrottle-local's currently can't -- a confirmed, currently-
+# unfixed bug (two independent always-on heartbeats each block their own
+# owning process's idle-timeout from ever elapsing; small, obvious fix,
+# not an architectural dead end -- see test_drain_ledger_ezthrottle.hurl's
+# header for the full citation), not a timing difference -- so it gets
+# its own file with a short, honest "expected to fail" budget instead of
+# an ever-growing retry count that won't pass against the current code.
 _AQUIFER_DRAIN_SUITE_FILES = [
     "shared/test_drain_ledger.hurl",
 ]
@@ -306,14 +306,16 @@ class AqueductRunner:
         """Named, individually-invocable: just the drain-ledger contract
         test, against the short-timer ezthrottle-local variant.
 
-        EXPECTED TO FAIL right now -- this is a confirmed, permanent bug
-        in ezthrottle-local (drain mode's idle-detection can never fire;
-        see test_drain_ledger_ezthrottle.hurl's header for the full
-        citation), not a flaky or slow test. Kept as an individually-
-        invocable target specifically so it's easy to re-run once that's
-        fixed upstream; deliberately excluded from test_all's default run
-        (see test_all) since running a guaranteed failure on every full
-        pass wastes time without telling anyone anything new."""
+        EXPECTED TO FAIL right now -- this is a confirmed, currently-
+        unfixed bug in ezthrottle-local (drain mode's idle-detection can't
+        fire as the code is currently written; a small, obvious fix, not
+        an architectural limitation -- see
+        test_drain_ledger_ezthrottle.hurl's header for the full citation),
+        not a flaky or slow test. Kept as an individually-invocable target
+        specifically so it's easy to re-run once that's fixed upstream;
+        deliberately excluded from test_all's default run (see test_all)
+        since running a known failure on every full pass wastes time
+        without telling anyone anything new."""
         recorder = (
             self.build_recorder(recorder_dir).with_exposed_port(RECORDER_PORT).as_service()
         )
@@ -388,13 +390,13 @@ class AqueductRunner:
         pass/fail per backend rather than stopping at the first failure.
 
         Deliberately excludes ezthrottle-drain: that check is a confirmed,
-        permanent upstream bug (see test_ezthrottle_drain's docstring),
-        not a flaky check that might pass on a good day -- running it here
-        would only add a guaranteed failure and several minutes of
-        wall-clock time to every full pass, without telling anyone
-        anything test_ezthrottle_drain run on its own doesn't already say
-        more clearly. Run `make contract-test-ezthrottle-drain` directly
-        to re-check it."""
+        currently-unfixed upstream bug (see test_ezthrottle_drain's
+        docstring), not a flaky check that might pass on a good day --
+        running it here would only add a known failure and several
+        minutes of wall-clock time to every full pass, without telling
+        anyone anything test_ezthrottle_drain run on its own doesn't
+        already say more clearly. Run `make contract-test-ezthrottle-drain`
+        directly to re-check it."""
         checks = (
             ("aquifer", self.test_aquifer(aquifer_source, hurl_dir, recorder_dir)),
             ("aquifer-drain", self.test_aquifer_drain(aquifer_source, hurl_dir, recorder_dir)),
@@ -416,7 +418,7 @@ class AqueductRunner:
             except dagger.ExecError as e:
                 lines.append(f"{name}: FAIL\n{e.stdout}\n{e.stderr}")
         lines.append(
-            "ezthrottle-drain: SKIPPED (confirmed permanent upstream bug -- "
+            "ezthrottle-drain: SKIPPED (confirmed, currently-unfixed upstream bug -- "
             "run `make contract-test-ezthrottle-drain` directly)"
         )
         return "\n\n".join(lines)

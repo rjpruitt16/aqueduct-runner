@@ -50,8 +50,9 @@ plus a backend-specific pair for drain mode (see the caveat below for why):
 - **`test_drain_ledger.hurl`** (Aquifer only) — a job's drain-mode ledger hash matches an
   independently precomputed SHA-256. Confirmed passing end-to-end.
 - **`test_drain_ledger_ezthrottle.hurl`** (ezthrottle-local only) — the identical check, currently
-  **expected to fail**: a confirmed, permanent bug in ezthrottle-local means its drain mode can
-  never flush at all. See the caveat below.
+  **expected to fail**: a confirmed, currently-unfixed bug in ezthrottle-local means its drain mode
+  can't flush as the code stands today. See the caveat below — it's an ordinary bug with an obvious
+  fix, not an architectural limitation.
 
 ## The recorder
 
@@ -74,27 +75,36 @@ Run this target on its own, not as part of a fast feedback loop.
 
 **ezthrottle-local**: `test_drain_ledger_ezthrottle.hurl` is expected to fail. This is a genuine
 finding this repo exists to catch, not a test-config problem — confirmed by direct investigation
-(real containers, real BEAM state, re-confirmed on an undisturbed second run) that ezthrottle-
-local's drain mode can currently **never** flush, for any URL that's ever routed a job:
+(real containers, real BEAM state, re-confirmed on an undisturbed second run) that as the code
+stands today, ezthrottle-local's drain mode can't flush, for any URL that's ever routed a job. This
+is an ordinary, fixable bug, not an architectural limitation of the design — see "the fix" below.
 
 - `lib/ezthrottle_local/account_queue.ex:91,210` — `schedule_position_broadcast/0` reschedules a
-  `:broadcast_positions` message to itself every 2 seconds, forever, unconditionally. Elixir's
-  GenServer receive-timeout (the mechanism `account_queue.ex:215-221` relies on to detect "idle
-  long enough to self-terminate", 5 minutes) only fires when *no* message arrives in the window —
-  since one always arrives every 2s, that timeout can never actually elapse.
+  `:broadcast_positions` message to itself every 2 seconds, unconditionally, for as long as the
+  process is alive. Elixir's GenServer receive-timeout (the mechanism `account_queue.ex:215-221`
+  relies on to detect "idle long enough to self-terminate", 5 minutes) only fires when *no* message
+  arrives in the window — since one always arrives every 2s, that timeout never gets a chance to
+  elapse as this code is currently written.
 - `lib/ezthrottle_local/url_actor.ex:111,234` — `schedule_budget_check/0` does the identical thing
   one level up, every 3 seconds, independently blocking `UrlActor`'s own 5-minute idle timeout
   (`url_actor.ex:202-208`) the same way.
 
-Either bug alone permanently prevents `account_queue_registry.ex`'s `idle_check` from ever seeing
-an empty worker table — the precondition `DrainFlush.attempt/0` needs before it runs at all.
-Confirmed live: `GET /health`'s `drain.state` stayed `"active"` for 16+ minutes after a single
-completed job with zero further activity. Aquifer's own drain mode has no equivalent bug — its
-idle-detection genuinely has no competing heartbeat resetting it.
+Either bug alone currently prevents `account_queue_registry.ex`'s `idle_check` from ever seeing an
+empty worker table — the precondition `DrainFlush.attempt/0` needs before it runs at all. Confirmed
+live: `GET /health`'s `drain.state` stayed `"active"` for 16+ minutes after a single completed job
+with zero further activity. Aquifer's own drain mode has no equivalent bug — its idle-detection has
+no competing heartbeat resetting it.
+
+**The fix** is small and doesn't require redesigning anything: stop rescheduling
+`broadcast_positions`/`check_aggregate_budget` once there's nothing left to report or rebalance, or
+(more robustly) stop relying on the GenServer receive-timeout for idle-detection at all and instead
+track a `last_activity_at` timestamp explicitly, checked on each heartbeat tick against real job
+activity rather than against "did any message arrive."
 
 `test_ezthrottle_drain` is deliberately excluded from `test_all`'s default run and uses a short,
-honest retry budget (not a longer one — no budget will ever make it pass). Re-run
-`make contract-test-ezthrottle-drain` directly once this is fixed upstream in ezthrottle-local.
+honest retry budget (not a longer one — no budget will make it pass against the current code).
+Re-run `make contract-test-ezthrottle-drain` directly once this is fixed upstream in
+ezthrottle-local.
 
 ## Repo structure
 
