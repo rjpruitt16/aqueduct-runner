@@ -36,7 +36,7 @@ Every target is individually invocable — call just the piece you want, not one
 
 ## What's actually tested
 
-Nine `.hurl` files under `hurl/shared/` — one shared suite run against both backends unmodified,
+Ten `.hurl` files under `hurl/shared/` — one shared suite run against both backends unmodified,
 plus a backend-specific pair for drain mode (see the caveat below for why):
 
 - **`test_health.hurl`** — `/health` shape.
@@ -46,6 +46,10 @@ plus a backend-specific pair for drain mode (see the caveat below for why):
 - **`test_proxy_direct.hurl`** — `POST /proxy` relays a healthy upstream's response verbatim.
 - **`test_proxy_fallback.hurl`** — `POST /proxy` against an overloaded upstream falls back to the
   durable queue and streams a real terminal event on the same connection.
+- **`test_proxy_queue_active.hurl`** — `POST /proxy` still relays a response carrying
+  `X-Aqueduct-Queue-Active: true` verbatim, but the *next* request to that domain is routed through
+  the queue instead of attempted directly — proving the proactive signal actually trips the breaker,
+  not just logs it.
 - **`test_l8_discovery.hurl`** — `/.well-known/l8` metadata, field-for-field identical on both sides.
 - **`test_drain_ledger.hurl`** (Aquifer only) — a job's drain-mode ledger hash matches an
   independently precomputed SHA-256. Confirmed passing end-to-end.

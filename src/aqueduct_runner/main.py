@@ -34,6 +34,7 @@ _SUITE_FILES = [
     "shared/test_idempotency.hurl",
     "shared/test_proxy_direct.hurl",
     "shared/test_proxy_fallback.hurl",
+    "shared/test_proxy_queue_active.hurl",
     "shared/test_l8_discovery.hurl",
 ]
 
