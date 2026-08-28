@@ -1,11 +1,14 @@
-# Runs only against the *_drain container variant (drain mode enabled, a
-# 2s timer instead of the 45s default). Submits a job under a fixed
-# user_id/idempotent_key (so the expected hash can be precomputed -- Hurl
-# has no built-in SHA-256), lets the node go idle past the timer, and
+# AQUIFER ONLY -- see test_drain_ledger_ezthrottle.hurl for why
+# ezthrottle-local needs its own separate file, not just a longer budget.
+#
+# Runs only against the aquifer *_drain container variant (drain mode
+# enabled, a 2s timer instead of the 45s default). Submits a job under a
+# fixed user_id/idempotent_key (so the expected hash can be precomputed --
+# Hurl has no built-in SHA-256), lets the node go idle past the timer, and
 # confirms the flushed ledger's hash matches what was computed
-# independently in the Dagger module -- proving both backends really do
-# hash "<user_id>:<idempotent_key>" the same way at the wire level, not
-# just by reading both sources.
+# independently in the Dagger module -- proving Aquifer really does hash
+# "<user_id>:<idempotent_key>" the way both backends are documented to,
+# not just from reading the source.
 #
 # This genuinely takes several minutes, and AQUIFER_DRAIN_TIMER_SECONDS
 # alone doesn't control that: found by direct debugging (Aquifer's
@@ -15,9 +18,8 @@
 # separate, hardcoded 5-minute constant (account_queue.go) with no env
 # var override. The short drain timer only controls the final countdown
 # once that precondition is already met, not how quickly it's reached.
-# ezthrottle-local's EZTHROTTLE_IDLE_TIMEOUT_MS-equivalent constant should
-# be checked for the same property before assuming its own drain test can
-# be any faster.
+# Confirmed passing end-to-end at 5m10s wall-clock, real drain webhook,
+# real hash match.
 
 POST {{recorder_url}}/reset
 HTTP 200

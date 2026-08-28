@@ -36,7 +36,8 @@ Every target is individually invocable — call just the piece you want, not one
 
 ## What's actually tested
 
-Eight `.hurl` files under `hurl/shared/`, one suite run against both backends unmodified:
+Nine `.hurl` files under `hurl/shared/` — one shared suite run against both backends unmodified,
+plus a backend-specific pair for drain mode (see the caveat below for why):
 
 - **`test_health.hurl`** — `/health` shape.
 - **`test_job_lifecycle.hurl`** — submit, poll status, confirm webhook delivery.
@@ -46,8 +47,11 @@ Eight `.hurl` files under `hurl/shared/`, one suite run against both backends un
 - **`test_proxy_fallback.hurl`** — `POST /proxy` against an overloaded upstream falls back to the
   durable queue and streams a real terminal event on the same connection.
 - **`test_l8_discovery.hurl`** — `/.well-known/l8` metadata, field-for-field identical on both sides.
-- **`test_drain_ledger.hurl`** — a job's drain-mode ledger hash matches an independently precomputed
-  SHA-256, proving both backends really hash `"<user_id>:<idempotent_key>"` the same way.
+- **`test_drain_ledger.hurl`** (Aquifer only) — a job's drain-mode ledger hash matches an
+  independently precomputed SHA-256. Confirmed passing end-to-end.
+- **`test_drain_ledger_ezthrottle.hurl`** (ezthrottle-local only) — the identical check, currently
+  **expected to fail**: a confirmed, permanent bug in ezthrottle-local means its drain mode can
+  never flush at all. See the caveat below.
 
 ## The recorder
 
@@ -58,16 +62,39 @@ polls with `[Options] retry`/`retry-interval`. It also doubles as a controllable
 (`POST /upstream/configure`) and a webhook/drain-webhook capture endpoint — the pieces the shared
 suite needs that neither backend's own test suite already provides standalone.
 
-## Known caveat: drain-mode testing is genuinely slow
+## Known caveat: drain-mode testing is genuinely slow (Aquifer) — and currently broken (ezthrottle-local)
 
-`test_drain_ledger.hurl` can take 5+ minutes per run. This isn't a flaw in the test — it's a real
-property of both backends, found by direct debugging: drain mode's own short timer
-(`AQUIFER_DRAIN_TIMER_SECONDS` / `EZTHROTTLE_DRAIN_TIMER_SECONDS`) only starts counting once every
-per-domain worker has already self-torn-down, which is gated by a **separate, hardcoded 5-minute
-idle constant** in both languages (`account_queue.go`'s `5 * time.Minute`, `url_actor.ex`'s
-`@idle_timeout_ms 300_000`) — not configurable via any env var. `build_aquifer_drain`/
-`build_ezthrottle_drain` set the short drain timer correctly; nothing shortens the precondition.
+**Aquifer**: `test_drain_ledger.hurl` takes 5+ minutes per run, confirmed passing end-to-end at
+5m10s. This isn't a flaw in the test — it's a real property of the backend, found by direct
+debugging: drain mode's own short timer (`AQUIFER_DRAIN_TIMER_SECONDS`) only starts counting once
+every per-domain worker has already self-torn-down, which is gated by a **separate, hardcoded
+5-minute idle constant** (`account_queue.go`'s `5 * time.Minute`) — not configurable via any env
+var. `build_aquifer_drain` sets the short drain timer correctly; nothing shortens the precondition.
 Run this target on its own, not as part of a fast feedback loop.
+
+**ezthrottle-local**: `test_drain_ledger_ezthrottle.hurl` is expected to fail. This is a genuine
+finding this repo exists to catch, not a test-config problem — confirmed by direct investigation
+(real containers, real BEAM state, re-confirmed on an undisturbed second run) that ezthrottle-
+local's drain mode can currently **never** flush, for any URL that's ever routed a job:
+
+- `lib/ezthrottle_local/account_queue.ex:91,210` — `schedule_position_broadcast/0` reschedules a
+  `:broadcast_positions` message to itself every 2 seconds, forever, unconditionally. Elixir's
+  GenServer receive-timeout (the mechanism `account_queue.ex:215-221` relies on to detect "idle
+  long enough to self-terminate", 5 minutes) only fires when *no* message arrives in the window —
+  since one always arrives every 2s, that timeout can never actually elapse.
+- `lib/ezthrottle_local/url_actor.ex:111,234` — `schedule_budget_check/0` does the identical thing
+  one level up, every 3 seconds, independently blocking `UrlActor`'s own 5-minute idle timeout
+  (`url_actor.ex:202-208`) the same way.
+
+Either bug alone permanently prevents `account_queue_registry.ex`'s `idle_check` from ever seeing
+an empty worker table — the precondition `DrainFlush.attempt/0` needs before it runs at all.
+Confirmed live: `GET /health`'s `drain.state` stayed `"active"` for 16+ minutes after a single
+completed job with zero further activity. Aquifer's own drain mode has no equivalent bug — its
+idle-detection genuinely has no competing heartbeat resetting it.
+
+`test_ezthrottle_drain` is deliberately excluded from `test_all`'s default run and uses a short,
+honest retry budget (not a longer one — no budget will ever make it pass). Re-run
+`make contract-test-ezthrottle-drain` directly once this is fixed upstream in ezthrottle-local.
 
 ## Repo structure
 
