@@ -83,15 +83,15 @@ finding this repo exists to catch, not a test-config problem — confirmed by di
 stands today, ezthrottle-local's drain mode can't flush, for any URL that's ever routed a job. This
 is an ordinary, fixable bug, not an architectural limitation of the design — see "the fix" below.
 
-- `lib/ezthrottle_local/account_queue.ex:91,210` — `schedule_position_broadcast/0` reschedules a
+- `lib/ezthrottle_local/account_queue.ex:100,219` — `schedule_position_broadcast/0` reschedules a
   `:broadcast_positions` message to itself every 2 seconds, unconditionally, for as long as the
-  process is alive. Elixir's GenServer receive-timeout (the mechanism `account_queue.ex:215-221`
+  process is alive. Elixir's GenServer receive-timeout (the mechanism `account_queue.ex:224-230`
   relies on to detect "idle long enough to self-terminate", 5 minutes) only fires when *no* message
   arrives in the window — since one always arrives every 2s, that timeout never gets a chance to
   elapse as this code is currently written.
-- `lib/ezthrottle_local/url_actor.ex:111,234` — `schedule_budget_check/0` does the identical thing
+- `lib/ezthrottle_local/url_actor.ex:126,255` — `schedule_budget_check/0` does the identical thing
   one level up, every 3 seconds, independently blocking `UrlActor`'s own 5-minute idle timeout
-  (`url_actor.ex:202-208`) the same way.
+  (`url_actor.ex:223-229`) the same way.
 
 Either bug alone currently prevents `account_queue_registry.ex`'s `idle_check` from ever seeing an
 empty worker table — the precondition `DrainFlush.attempt/0` needs before it runs at all. Confirmed

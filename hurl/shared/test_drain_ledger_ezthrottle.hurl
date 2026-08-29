@@ -13,20 +13,20 @@
 # always-on heartbeats that each keep resetting the very idle timeout
 # they're supposed to let elapse:
 #
-#   - lib/ezthrottle_local/account_queue.ex:91,210 -- `schedule_position_broadcast/0`
+#   - lib/ezthrottle_local/account_queue.ex:100,219 -- `schedule_position_broadcast/0`
 #     unconditionally reschedules a `:broadcast_positions` message to
 #     itself every @position_broadcast_ms (2_000ms), forever, regardless
 #     of whether the queue is empty. Elixir's GenServer receive-timeout
 #     (`{:noreply, state, @idle_timeout_ms}`, 300_000ms) only fires when
 #     NO message arrives within the window -- since a message always
-#     arrives every 2s, the AccountQueue's own `:timeout` (account_queue.ex:215-221,
+#     arrives every 2s, the AccountQueue's own `:timeout` (account_queue.ex:224-230,
 #     the check that would let it self-terminate when idle) can never
 #     actually elapse.
 #
-#   - lib/ezthrottle_local/url_actor.ex:111,234 -- `schedule_budget_check/0`
+#   - lib/ezthrottle_local/url_actor.ex:126,255 -- `schedule_budget_check/0`
 #     does the identical thing one level up, every @budget_check_ms
 #     (3_000ms), independently blocking UrlActor's own idle timeout
-#     (url_actor.ex:202-208) the same way.
+#     (url_actor.ex:223-229) the same way.
 #
 # Either bug alone currently prevents account_queue_registry.ex's
 # `idle_check` from ever observing an empty ETS table, which is the
