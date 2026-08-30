@@ -38,14 +38,11 @@ _SUITE_FILES = [
     "shared/test_l8_discovery.hurl",
 ]
 
-# Aquifer's drain mode is proven to work end-to-end (confirmed passing at
-# 5m10s). ezthrottle-local's currently can't -- a confirmed, currently-
-# unfixed bug (two independent always-on heartbeats each block their own
-# owning process's idle-timeout from ever elapsing; small, obvious fix,
-# not an architectural dead end -- see test_drain_ledger_ezthrottle.hurl's
-# header for the full citation), not a timing difference -- so it gets
-# its own file with a short, honest "expected to fail" budget instead of
-# an ever-growing retry count that won't pass against the current code.
+# Both backends' drain modes are proven to work end-to-end now: Aquifer at
+# ~5m10s, ezthrottle-local at ~10m13s -- separate files because they
+# genuinely need different retry budgets, not because one is broken (that
+# was true earlier this session; fixed since -- see
+# test_drain_ledger_ezthrottle.hurl's header for the root cause and fix).
 _AQUIFER_DRAIN_SUITE_FILES = [
     "shared/test_drain_ledger.hurl",
 ]
@@ -307,16 +304,14 @@ class AqueductRunner:
         """Named, individually-invocable: just the drain-ledger contract
         test, against the short-timer ezthrottle-local variant.
 
-        EXPECTED TO FAIL right now -- this is a confirmed, currently-
-        unfixed bug in ezthrottle-local (drain mode's idle-detection can't
-        fire as the code is currently written; a small, obvious fix, not
-        an architectural limitation -- see
-        test_drain_ledger_ezthrottle.hurl's header for the full citation),
-        not a flaky or slow test. Kept as an individually-invocable target
-        specifically so it's easy to re-run once that's fixed upstream;
-        deliberately excluded from test_all's default run (see test_all)
-        since running a known failure on every full pass wastes time
-        without telling anyone anything new."""
+        Confirmed passing end-to-end at ~10m13s -- roughly double
+        Aquifer's ~5m10s, a genuine property of a two-level nested idle
+        wait Aquifer doesn't have (see test_drain_ledger_ezthrottle.hurl's
+        header for the full explanation), not a flaw in the test. This
+        used to be a confirmed, permanent failure -- found and fixed
+        earlier this session (two always-on heartbeats in account_queue.ex
+        and url_actor.ex were blocking their own idle-timeout from ever
+        firing at all)."""
         recorder = (
             self.build_recorder(recorder_dir).with_exposed_port(RECORDER_PORT).as_service()
         )
@@ -390,14 +385,13 @@ class AqueductRunner:
         """Runs the full suite against both backends, aggregating
         pass/fail per backend rather than stopping at the first failure.
 
-        Deliberately excludes ezthrottle-drain: that check is a confirmed,
-        currently-unfixed upstream bug (see test_ezthrottle_drain's
-        docstring), not a flaky check that might pass on a good day --
-        running it here would only add a known failure and several
-        minutes of wall-clock time to every full pass, without telling
-        anyone anything test_ezthrottle_drain run on its own doesn't
-        already say more clearly. Run `make contract-test-ezthrottle-drain`
-        directly to re-check it."""
+        Includes both drain checks -- aquifer-drain (~5m10s) and
+        ezthrottle-drain (~10m13s, roughly double: a genuine two-level
+        nested idle wait Aquifer doesn't have, see
+        test_drain_ledger_ezthrottle.hurl) -- so a full test-all run takes
+        real wall-clock time, on the order of 15+ minutes. Run the
+        individual named targets directly for fast feedback; this one is
+        for confirming everything together, not a fast loop."""
         checks = (
             ("aquifer", self.test_aquifer(aquifer_source, hurl_dir, recorder_dir)),
             ("aquifer-drain", self.test_aquifer_drain(aquifer_source, hurl_dir, recorder_dir)),
@@ -406,6 +400,10 @@ class AqueductRunner:
                 self.test_aquifer_admission(aquifer_source, hurl_dir, recorder_dir),
             ),
             ("ezthrottle", self.test_ezthrottle(ezthrottle_source, hurl_dir, recorder_dir)),
+            (
+                "ezthrottle-drain",
+                self.test_ezthrottle_drain(ezthrottle_source, hurl_dir, recorder_dir),
+            ),
             (
                 "ezthrottle-admission",
                 self.test_ezthrottle_admission(ezthrottle_source, hurl_dir, recorder_dir),
@@ -418,8 +416,4 @@ class AqueductRunner:
                 lines.append(f"{name}: PASS")
             except dagger.ExecError as e:
                 lines.append(f"{name}: FAIL\n{e.stdout}\n{e.stderr}")
-        lines.append(
-            "ezthrottle-drain: SKIPPED (confirmed, currently-unfixed upstream bug -- "
-            "run `make contract-test-ezthrottle-drain` directly)"
-        )
         return "\n\n".join(lines)

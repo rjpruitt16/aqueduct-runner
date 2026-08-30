@@ -52,11 +52,10 @@ plus a backend-specific pair for drain mode (see the caveat below for why):
   not just logs it.
 - **`test_l8_discovery.hurl`** — `/.well-known/l8` metadata, field-for-field identical on both sides.
 - **`test_drain_ledger.hurl`** (Aquifer only) — a job's drain-mode ledger hash matches an
-  independently precomputed SHA-256. Confirmed passing end-to-end.
-- **`test_drain_ledger_ezthrottle.hurl`** (ezthrottle-local only) — the identical check, currently
-  **expected to fail**: a confirmed, currently-unfixed bug in ezthrottle-local means its drain mode
-  can't flush as the code stands today. See the caveat below — it's an ordinary bug with an obvious
-  fix, not an architectural limitation.
+  independently precomputed SHA-256. Confirmed passing end-to-end at ~5m10s.
+- **`test_drain_ledger_ezthrottle.hurl`** (ezthrottle-local only) — the identical check. Confirmed
+  passing end-to-end at ~10m13s, roughly double Aquifer's — a genuine timing difference, not a bug
+  (see the caveat below); separate files because the two backends need different retry budgets.
 
 ## The recorder
 
@@ -67,7 +66,7 @@ polls with `[Options] retry`/`retry-interval`. It also doubles as a controllable
 (`POST /upstream/configure`) and a webhook/drain-webhook capture endpoint — the pieces the shared
 suite needs that neither backend's own test suite already provides standalone.
 
-## Known caveat: drain-mode testing is genuinely slow (Aquifer) — and currently broken (ezthrottle-local)
+## Known caveat: drain-mode testing is genuinely slow
 
 **Aquifer**: `test_drain_ledger.hurl` takes 5+ minutes per run, confirmed passing end-to-end at
 5m10s. This isn't a flaw in the test — it's a real property of the backend, found by direct
@@ -77,38 +76,31 @@ every per-domain worker has already self-torn-down, which is gated by a **separa
 var. `build_aquifer_drain` sets the short drain timer correctly; nothing shortens the precondition.
 Run this target on its own, not as part of a fast feedback loop.
 
-**ezthrottle-local**: `test_drain_ledger_ezthrottle.hurl` is expected to fail. This is a genuine
-finding this repo exists to catch, not a test-config problem — confirmed by direct investigation
-(real containers, real BEAM state, re-confirmed on an undisturbed second run) that as the code
-stands today, ezthrottle-local's drain mode can't flush, for any URL that's ever routed a job. This
-is an ordinary, fixable bug, not an architectural limitation of the design — see "the fix" below.
+**ezthrottle-local**: `test_drain_ledger_ezthrottle.hurl` takes even longer — confirmed passing
+end-to-end at ~10m13s, roughly double Aquifer's. This was a real, confirmed *bug* earlier in this
+same effort (drain mode could never flush at all, not just slowly), found by direct investigation
+and since fixed:
 
-- `lib/ezthrottle_local/account_queue.ex:100,219` — `schedule_position_broadcast/0` reschedules a
+- `lib/ezthrottle_local/account_queue.ex` — `schedule_position_broadcast/0` used to reschedule a
   `:broadcast_positions` message to itself every 2 seconds, unconditionally, for as long as the
-  process is alive. Elixir's GenServer receive-timeout (the mechanism `account_queue.ex:224-230`
-  relies on to detect "idle long enough to self-terminate", 5 minutes) only fires when *no* message
-  arrives in the window — since one always arrives every 2s, that timeout never gets a chance to
-  elapse as this code is currently written.
-- `lib/ezthrottle_local/url_actor.ex:126,255` — `schedule_budget_check/0` does the identical thing
-  one level up, every 3 seconds, independently blocking `UrlActor`'s own 5-minute idle timeout
-  (`url_actor.ex:223-229`) the same way.
+  process was alive. Elixir's GenServer receive-timeout (the mechanism the queue relies on to detect
+  "idle long enough to self-terminate", 5 minutes) only fires when *no* message arrives in the
+  window — since one always arrived every 2s, that timeout never got a chance to elapse.
+- `lib/ezthrottle_local/url_actor.ex` — `schedule_budget_check/0` did the identical thing one level
+  up, every 3 seconds, independently blocking `UrlActor`'s own 5-minute idle timeout.
 
-Either bug alone currently prevents `account_queue_registry.ex`'s `idle_check` from ever seeing an
-empty worker table — the precondition `DrainFlush.attempt/0` needs before it runs at all. Confirmed
-live: `GET /health`'s `drain.state` stayed `"active"` for 16+ minutes after a single completed job
-with zero further activity. Aquifer's own drain mode has no equivalent bug — its idle-detection has
-no competing heartbeat resetting it.
+**The fix**: each heartbeat now stops rescheduling itself once idle (queue/queues actually empty),
+and restarts only on the transition back to real work, in the same `{:enqueue, ...}` handler that
+already existed — no redesign needed.
 
-**The fix** is small and doesn't require redesigning anything: stop rescheduling
-`broadcast_positions`/`check_aggregate_budget` once there's nothing left to report or rebalance, or
-(more robustly) stop relying on the GenServer receive-timeout for idle-detection at all and instead
-track a `last_activity_at` timestamp explicitly, checked on each heartbeat tick against real job
-activity rather than against "did any message arrive."
-
-`test_ezthrottle_drain` is deliberately excluded from `test_all`'s default run and uses a short,
-honest retry budget (not a longer one — no budget will make it pass against the current code).
-Re-run `make contract-test-ezthrottle-drain` directly once this is fixed upstream in
-ezthrottle-local.
+That fix is *why* the confirmed timing is ~10m13s rather than ~5min like Aquifer: ezthrottle-local
+has a genuine two-level nested wait Aquifer doesn't. `AccountQueue` needs its own ~5min idle wait to
+self-terminate, and only then does `UrlActor` receive the resulting `:DOWN` message and start
+counting *its own* separate ~5min idle wait from that point. Aquifer avoids this because `URLWorker`
+has no timeout of its own — it's removed from the registry immediately via an `onIdle` callback the
+moment its last child empties, event-driven rather than a second receive-timeout to wait out. Neither
+backend's drain check runs as part of a fast feedback loop; run the individual named targets for
+that, `test-all` for confirming everything together.
 
 ## Repo structure
 
