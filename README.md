@@ -28,7 +28,7 @@ make help                              # list every named target
 make contract-test-aquifer             # full shared suite against Aquifer
 make contract-test-ezthrottle          # full shared suite against ezthrottle-local
 make contract-test-aquifer-admission   # admission-rejection test only
-make contract-test-aquifer-drain       # drain-ledger test only (see caveat below)
+make contract-test-aquifer-drain       # drain-ledger test only (~40s, see "Drain-mode timing" below)
 make contract-test-all                 # everything, both backends
 ```
 
@@ -37,7 +37,7 @@ Every target is individually invocable — call just the piece you want, not one
 ## What's actually tested
 
 Ten `.hurl` files under `hurl/shared/` — one shared suite run against both backends unmodified,
-plus a backend-specific pair for drain mode (see the caveat below for why):
+plus a backend-specific pair for drain mode (see "Drain-mode timing" below for why):
 
 - **`test_health.hurl`** — `/health` shape.
 - **`test_job_lifecycle.hurl`** — submit, poll status, confirm webhook delivery.
@@ -52,11 +52,12 @@ plus a backend-specific pair for drain mode (see the caveat below for why):
   not just logs it.
 - **`test_l8_discovery.hurl`** — `/.well-known/l8` metadata, field-for-field identical on both sides.
 - **`test_drain_ledger.hurl`** (Aquifer only) — a job's drain-mode ledger hash matches an
-  independently precomputed SHA-256. Confirmed passing end-to-end at ~40s (with the idle-timeout
-  override — see the caveat below).
+  independently precomputed SHA-256. Confirmed passing end-to-end at ~40s (see "Drain-mode timing"
+  below).
 - **`test_drain_ledger_ezthrottle.hurl`** (ezthrottle-local only) — the identical check. Confirmed
   passing end-to-end at ~70s, still roughly double Aquifer's — a genuine timing difference, not a bug
-  (see the caveat below); separate files because the two backends need different retry budgets.
+  (see "Drain-mode timing" below); separate files because the two backends need different retry
+  budgets.
 
 ## The recorder
 
@@ -67,44 +68,25 @@ polls with `[Options] retry`/`retry-interval`. It also doubles as a controllable
 (`POST /upstream/configure`) and a webhook/drain-webhook capture endpoint — the pieces the shared
 suite needs that neither backend's own test suite already provides standalone.
 
-## Known caveat: drain mode needs an idle-timeout override, or it's genuinely slow
+## Drain-mode timing
 
 Drain mode's own short timer (`AQUIFER_DRAIN_TIMER_SECONDS`/`EZTHROTTLE_DRAIN_TIMER_SECONDS`) only
-starts counting once every per-domain worker has already self-torn-down from idleness — that
-self-teardown used to be a hardcoded 5-minute constant in both backends with no override, so
-`test_drain_ledger*.hurl` genuinely took 5-10+ real minutes per run. Both backends now expose that
-idle timeout as an env var (`AQUIFER_IDLE_TIMEOUT_SECONDS` / `EZTHROTTLE_IDLE_TIMEOUT_MS`), defaulting
-to 5 minutes in production, unchanged — `build_aquifer_drain`/`build_ezthrottle_drain` set it to 30s
-(30_000ms) specifically so these two tests don't burn real CI/Dagger-Cloud time waiting out
-production timing for something the shortened value proves identically. Confirmed passing end-to-end
-at ~40s (Aquifer) and ~70s (ezthrottle-local) with the override — down from ~5m10s and ~10m13s
-without it.
+starts counting once every per-domain worker has already self-torn-down from idleness. Both backends
+expose that idle-teardown timer as its own env var (`AQUIFER_IDLE_TIMEOUT_SECONDS` /
+`EZTHROTTLE_IDLE_TIMEOUT_MS`, defaulting to 5 minutes in production) — `build_aquifer_drain`/
+`build_ezthrottle_drain` set it to 30s here, which is why `test_drain_ledger*.hurl` run in ~40s
+(Aquifer) and ~70s (ezthrottle-local) rather than several real minutes each.
 
-ezthrottle-local's is still roughly double Aquifer's, override or not — a genuine, permanent timing
-difference, not a bug: it has a two-level nested idle wait Aquifer doesn't. `AccountQueue` needs its
-own idle wait to self-terminate, and only then does `UrlActor` receive the resulting `:DOWN` message
-and start counting *its own* separate idle wait from that point (one shared env var controls both
-levels at once). Aquifer avoids this because `URLWorker` has no timeout of its own — it's removed
-from the registry immediately via an `onIdle` callback the moment its last child empties,
-event-driven rather than a second receive-timeout to wait out.
+ezthrottle-local's stays roughly double Aquifer's regardless of the override — a genuine, permanent
+timing difference, not a bug: it has a two-level nested idle wait Aquifer doesn't. `AccountQueue`
+needs its own idle wait to self-terminate, and only then does `UrlActor` receive the resulting
+`:DOWN` message and start counting *its own* separate idle wait from that point (one shared env var
+controls both levels at once). Aquifer avoids this because `URLWorker` has no timeout of its own —
+it's removed from the registry immediately via an `onIdle` callback the moment its last child
+empties, event-driven rather than a second receive-timeout to wait out.
 
-**ezthrottle-local's drain mode used to be genuinely broken**, not just slow — found and fixed
-earlier in this same effort: two independent always-on heartbeats each kept resetting the very idle
-timeout they were supposed to let elapse, so it could never flush at all, regardless of any timeout
-value.
-
-- `lib/ezthrottle_local/account_queue.ex` — `schedule_position_broadcast/0` used to reschedule a
-  `:broadcast_positions` message to itself every 2 seconds, unconditionally, for as long as the
-  process was alive. Elixir's GenServer receive-timeout (the mechanism the queue relies on to detect
-  "idle long enough to self-terminate") only fires when *no* message arrives in the window — since
-  one always arrived every 2s, that timeout never got a chance to elapse.
-- `lib/ezthrottle_local/url_actor.ex` — `schedule_budget_check/0` did the identical thing one level
-  up, every 3 seconds, independently blocking `UrlActor`'s own idle timeout.
-
-The fix: each heartbeat now stops rescheduling itself once idle (queue/queues actually empty), and
-restarts only on the transition back to real work, in the same `{:enqueue, ...}` handler that already
-existed — no redesign needed. `test-all` includes both drain checks; run the individual named targets
-for faster feedback on everything else.
+`test-all` includes both drain checks; run the individual named targets for faster feedback on
+everything else.
 
 ## Repo structure
 
@@ -113,7 +95,7 @@ aqueduct-runner/
   Makefile
   dagger/                 # the Dagger module itself (Python SDK)
     src/aqueduct_runner/main.py
-  hurl/shared/*.hurl       # the 8 contract-test files, above
+  hurl/shared/*.hurl       # the ten contract-test files, above
   recorder/                # the Flask fixture service
 ```
 
