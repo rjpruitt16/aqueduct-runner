@@ -10,16 +10,18 @@
 # "<user_id>:<idempotent_key>" the way both backends are documented to,
 # not just from reading the source.
 #
-# This genuinely takes several minutes, and AQUIFER_DRAIN_TIMER_SECONDS
-# alone doesn't control that: found by direct debugging (Aquifer's
-# drain.go) that the drain watchdog only starts counting once the
-# Registry's per-domain worker map is *empty* -- which requires the
-# underlying AccountQueue's own idle self-teardown timer to fire first, a
-# separate, hardcoded 5-minute constant (account_queue.go) with no env
-# var override. The short drain timer only controls the final countdown
-# once that precondition is already met, not how quickly it's reached.
-# Confirmed passing end-to-end at 5m10s wall-clock, real drain webhook,
-# real hash match.
+# AQUIFER_DRAIN_TIMER_SECONDS alone doesn't control how long this takes:
+# found by direct debugging (Aquifer's drain.go) that the drain watchdog
+# only starts counting once the Registry's per-domain worker map is
+# *empty* -- which requires the underlying AccountQueue's own idle
+# self-teardown timer to fire first, previously a hardcoded 5-minute
+# constant with no override. Now configurable via
+# AQUIFER_IDLE_TIMEOUT_SECONDS (defaults to 300 in production;
+# build_aquifer_drain sets it to 30 here) -- exists specifically so this
+# test doesn't have to burn 5+ real minutes per run. Confirmed passing
+# end-to-end well under a minute with that override, real drain webhook,
+# real hash match (previously confirmed at 5m10s before the override
+# existed, with the same underlying logic).
 
 POST {{recorder_url}}/reset
 HTTP 200
@@ -44,7 +46,7 @@ HTTP 201
 # the node to go idle and flush its ledger to the recorder.
 GET {{recorder_url}}/drain-webhooks/latest
 [Options]
-retry: 400
+retry: 90
 retry-interval: 1000
 HTTP 200
 [Asserts]

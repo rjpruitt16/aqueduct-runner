@@ -39,10 +39,12 @@ _SUITE_FILES = [
 ]
 
 # Both backends' drain modes are proven to work end-to-end now: Aquifer at
-# ~5m10s, ezthrottle-local at ~10m13s -- separate files because they
-# genuinely need different retry budgets, not because one is broken (that
-# was true earlier this session; fixed since -- see
-# test_drain_ledger_ezthrottle.hurl's header for the root cause and fix).
+# ~40s, ezthrottle-local at ~70s (with the idle-timeout override both
+# build_*_drain functions set -- see test_drain_ledger_ezthrottle.hurl's
+# header for the full explanation, including why ezthrottle-local is still
+# roughly double Aquifer's even with the override). Separate files because
+# the two backends genuinely need different retry budgets, not because one
+# is broken (that was true earlier this session; fixed since).
 _AQUIFER_DRAIN_SUITE_FILES = [
     "shared/test_drain_ledger.hurl",
 ]
@@ -82,12 +84,19 @@ class AqueductRunner:
 
     @function
     def build_aquifer_drain(self, source: dagger.Directory) -> Container:
-        """Same image, with drain mode enabled and a short timer so
-        test_drain_ledger.hurl doesn't wait 45s for the default."""
+        """Same image, with drain mode enabled and short timers so
+        test_drain_ledger.hurl doesn't wait out real production timing --
+        the 45s drain-timer default, or the 5-minute idle-teardown
+        AccountQueue needs before the drain timer even starts counting.
+        Both env vars are opt-in overrides (AQUIFER_IDLE_TIMEOUT_SECONDS
+        defaults to 300 in production); this is the whole reason they
+        exist, so this specific contract test isn't the thing burning 5+
+        real CI minutes per run."""
         return (
             self.build_aquifer(source)
             .with_env_variable("AQUIFER_DRAIN_ENABLED", "true")
             .with_env_variable("AQUIFER_DRAIN_TIMER_SECONDS", "2")
+            .with_env_variable("AQUIFER_IDLE_TIMEOUT_SECONDS", "30")
             .with_env_variable(
                 "AQUIFER_DRAIN_WEBHOOK_URL",
                 f"http://recorder:{RECORDER_PORT}/drain-webhook",
@@ -120,10 +129,16 @@ class AqueductRunner:
 
     @function
     def build_ezthrottle_drain(self, source: dagger.Directory) -> Container:
+        """See build_aquifer_drain's docstring -- same idea.
+        EZTHROTTLE_IDLE_TIMEOUT_MS controls both AccountQueue's and
+        UrlActor's idle-teardown (one shared knob, defaults to 300_000ms
+        in production); ezthrottle-local needs both shortened, since it
+        has a genuine two-level nested idle wait Aquifer doesn't."""
         return (
             self.build_ezthrottle(source)
             .with_env_variable("EZTHROTTLE_DRAIN_ENABLED", "true")
             .with_env_variable("EZTHROTTLE_DRAIN_TIMER_SECONDS", "2")
+            .with_env_variable("EZTHROTTLE_IDLE_TIMEOUT_MS", "30000")
             .with_env_variable(
                 "EZTHROTTLE_DRAIN_WEBHOOK_URL",
                 f"http://recorder:{RECORDER_PORT}/drain-webhook",
@@ -275,7 +290,8 @@ class AqueductRunner:
     ) -> str:
         """Named, individually-invocable: just the drain-ledger contract
         test, against the short-timer Aquifer variant. Confirmed passing
-        end-to-end (5m10s, real drain webhook, real hash match)."""
+        end-to-end (~40s with the AQUIFER_IDLE_TIMEOUT_SECONDS override
+        build_aquifer_drain sets; real drain webhook, real hash match)."""
         recorder = (
             self.build_recorder(recorder_dir).with_exposed_port(RECORDER_PORT).as_service()
         )
@@ -304,13 +320,15 @@ class AqueductRunner:
         """Named, individually-invocable: just the drain-ledger contract
         test, against the short-timer ezthrottle-local variant.
 
-        Confirmed passing end-to-end at ~10m13s -- roughly double
-        Aquifer's ~5m10s, a genuine property of a two-level nested idle
-        wait Aquifer doesn't have (see test_drain_ledger_ezthrottle.hurl's
-        header for the full explanation), not a flaw in the test. This
-        used to be a confirmed, permanent failure -- found and fixed
-        earlier this session (two always-on heartbeats in account_queue.ex
-        and url_actor.ex were blocking their own idle-timeout from ever
+        Confirmed passing end-to-end at ~70s (with the
+        EZTHROTTLE_IDLE_TIMEOUT_MS override build_ezthrottle_drain sets)
+        -- roughly double Aquifer's ~40s, a genuine property of a
+        two-level nested idle wait Aquifer doesn't have (see
+        test_drain_ledger_ezthrottle.hurl's header for the full
+        explanation), not a flaw in the test. This used to be a
+        confirmed, permanent failure -- found and fixed earlier this
+        session (two always-on heartbeats in account_queue.ex and
+        url_actor.ex were blocking their own idle-timeout from ever
         firing at all)."""
         recorder = (
             self.build_recorder(recorder_dir).with_exposed_port(RECORDER_PORT).as_service()
@@ -385,13 +403,14 @@ class AqueductRunner:
         """Runs the full suite against both backends, aggregating
         pass/fail per backend rather than stopping at the first failure.
 
-        Includes both drain checks -- aquifer-drain (~5m10s) and
-        ezthrottle-drain (~10m13s, roughly double: a genuine two-level
+        Includes both drain checks -- aquifer-drain (~40s) and
+        ezthrottle-drain (~70s, roughly double: a genuine two-level
         nested idle wait Aquifer doesn't have, see
-        test_drain_ledger_ezthrottle.hurl) -- so a full test-all run takes
-        real wall-clock time, on the order of 15+ minutes. Run the
-        individual named targets directly for fast feedback; this one is
-        for confirming everything together, not a fast loop."""
+        test_drain_ledger_ezthrottle.hurl) -- both fast now thanks to the
+        idle-timeout overrides build_aquifer_drain/build_ezthrottle_drain
+        set. Run the individual named targets directly for fast feedback
+        on everything else; this one is for confirming everything
+        together."""
         checks = (
             ("aquifer", self.test_aquifer(aquifer_source, hurl_dir, recorder_dir)),
             ("aquifer-drain", self.test_aquifer_drain(aquifer_source, hurl_dir, recorder_dir)),
