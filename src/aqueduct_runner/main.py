@@ -38,13 +38,10 @@ _SUITE_FILES = [
     "shared/test_l8_discovery.hurl",
 ]
 
-# Both backends' drain modes are proven to work end-to-end now: Aquifer at
-# ~40s, ezthrottle-local at ~70s (with the idle-timeout override both
-# build_*_drain functions set -- see test_drain_ledger_ezthrottle.hurl's
-# header for the full explanation, including why ezthrottle-local is still
-# roughly double Aquifer's even with the override). Separate files because
-# the two backends genuinely need different retry budgets, not because one
-# is broken (that was true earlier this session; fixed since).
+# Both backends' drain modes work end-to-end, confirmed at ~40s each with
+# the idle-timeout override both build_*_drain functions set (see
+# test_drain_ledger_ezthrottle.hurl's header). Separate files because the
+# two backends' idle-timeout env vars differ.
 _AQUIFER_DRAIN_SUITE_FILES = [
     "shared/test_drain_ledger.hurl",
 ]
@@ -318,18 +315,11 @@ class AqueductRunner:
         recorder_dir: dagger.Directory,
     ) -> str:
         """Named, individually-invocable: just the drain-ledger contract
-        test, against the short-timer ezthrottle-local variant.
-
-        Confirmed passing end-to-end at ~70s (with the
-        EZTHROTTLE_IDLE_TIMEOUT_MS override build_ezthrottle_drain sets)
-        -- roughly double Aquifer's ~40s, a genuine property of a
-        two-level nested idle wait Aquifer doesn't have (see
-        test_drain_ledger_ezthrottle.hurl's header for the full
-        explanation), not a flaw in the test. This used to be a
-        confirmed, permanent failure -- found and fixed earlier this
-        session (two always-on heartbeats in account_queue.ex and
-        url_actor.ex were blocking their own idle-timeout from ever
-        firing at all)."""
+        test, against the short-timer ezthrottle-local variant. Confirmed
+        passing end-to-end at ~40s with the EZTHROTTLE_IDLE_TIMEOUT_MS
+        override build_ezthrottle_drain sets, matching Aquifer's timing
+        (see test_drain_ledger_ezthrottle.hurl's header for why they'd
+        otherwise differ)."""
         recorder = (
             self.build_recorder(recorder_dir).with_exposed_port(RECORDER_PORT).as_service()
         )
@@ -403,14 +393,11 @@ class AqueductRunner:
         """Runs the full suite against both backends, aggregating
         pass/fail per backend rather than stopping at the first failure.
 
-        Includes both drain checks -- aquifer-drain (~40s) and
-        ezthrottle-drain (~70s, roughly double: a genuine two-level
-        nested idle wait Aquifer doesn't have, see
-        test_drain_ledger_ezthrottle.hurl) -- both fast now thanks to the
-        idle-timeout overrides build_aquifer_drain/build_ezthrottle_drain
-        set. Run the individual named targets directly for fast feedback
-        on everything else; this one is for confirming everything
-        together."""
+        Includes both drain checks -- aquifer-drain and ezthrottle-drain,
+        each ~40s thanks to the idle-timeout overrides
+        build_aquifer_drain/build_ezthrottle_drain set. Run the individual
+        named targets directly for fast feedback on everything else; this
+        one is for confirming everything together."""
         checks = (
             ("aquifer", self.test_aquifer(aquifer_source, hurl_dir, recorder_dir)),
             ("aquifer-drain", self.test_aquifer_drain(aquifer_source, hurl_dir, recorder_dir)),

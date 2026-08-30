@@ -5,34 +5,14 @@
 # confirms the flushed ledger's hash matches what was computed
 # independently in the Dagger module.
 #
-# Without an idle-timeout override this genuinely takes longer than
-# Aquifer's equivalent (~5m10s, test_drain_ledger.hurl) -- confirmed live
-# at ~10m13s, roughly double. Root cause, found earlier this session and
-# now fixed: two independent always-on heartbeats used to keep resetting
-# the idle timeout they were supposed to let elapse, so drain mode could
-# never flush at all --
-#
-#   - lib/ezthrottle_local/account_queue.ex -- `schedule_position_broadcast/0`
-#     rescheduled a `:broadcast_positions` message to itself every 2s,
-#     forever, regardless of whether the queue was empty.
-#   - lib/ezthrottle_local/url_actor.ex -- `schedule_budget_check/0` did the
-#     identical thing one level up, every 3s.
-#
-# Fixed by making each heartbeat stop rescheduling itself once idle,
-# restarting only on the transition back to real work (the same
-# `{:enqueue, ...}` handler that already existed).
-#
-# ezthrottle-local has a genuine two-level nested wait Aquifer doesn't --
-# AccountQueue needs its own idle wait to self-terminate, and only then
-# does UrlActor receive the resulting `:DOWN` message and start counting
-# *its own* separate idle wait from that point (Aquifer avoids this
-# because URLWorker has no timeout of its own -- it's removed from the
-# registry immediately via an onIdle callback the moment its last child
-# empties, event-driven rather than a second receive-timeout to wait
-# out) -- which is exactly why this needed its own env var:
-# EZTHROTTLE_IDLE_TIMEOUT_MS controls both levels at once (defaults to
-# 300_000ms/5min in production; build_ezthrottle_drain sets it to 30_000ms
-# here), so this test doesn't have to burn 10+ real minutes per run.
+# Without an idle-timeout override this genuinely takes real minutes:
+# drain mode's own short timer only starts counting once AccountQueue has
+# already self-torn-down from idleness, and UrlActor tears itself down
+# (event-driven, the moment it notices its last child is gone) right
+# after. EZTHROTTLE_IDLE_TIMEOUT_MS controls that idle wait (defaults to
+# 300_000ms/5min in production; build_ezthrottle_drain sets it to
+# 30_000ms here), which is why this test runs in ~40s, matching Aquifer's
+# equivalent.
 
 POST {{recorder_url}}/reset
 HTTP 200
@@ -58,7 +38,7 @@ HTTP 201
 # and flush its ledger to the recorder.
 GET {{recorder_url}}/drain-webhooks/latest
 [Options]
-retry: 150
+retry: 90
 retry-interval: 1000
 HTTP 200
 [Asserts]
