@@ -174,4 +174,8 @@ def health():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, threaded=True)
+    # "::" (not "0.0.0.0") -- Fly's private 6PN network delivers over IPv6,
+    # and an IPv4-only bind gets a connection reset for any request that
+    # arrives that way. "::" is dual-stack on Linux by default, so IPv4
+    # keeps working too.
+    app.run(host="::", port=5000, threaded=True)
