@@ -163,6 +163,92 @@ class AqueductRunner:
         )
 
     @function
+    def build_valkey(self) -> Container:
+        """Official image, unmodified -- Canalis's own DESIGN.md calls this
+        out as the one dependency to reuse rather than build."""
+        return dag.container().from_("valkey/valkey:8")
+
+    @function
+    def build_canalis(self, source: dagger.Directory) -> Container:
+        """canalis-rs's own Dockerfile, unmodified. CANALIS_VALKEY_URL is
+        the one piece of config that has to change per-environment (it
+        defaults to 127.0.0.1, which only makes sense for local, non-
+        containerized runs) -- pointed at the "valkey" service alias
+        test_registration binds onto this container below."""
+        return (
+            dag.container()
+            .build(source)
+            .with_env_variable("CANALIS_VALKEY_URL", "redis://valkey:6379")
+        )
+
+    @function
+    def build_aquifer_registration(self, source: dagger.Directory) -> Container:
+        """Same base image as build_aquifer, with AQUIFER_REGISTRY_URL
+        pointed at the "canalis" service alias test_registration binds onto
+        this container below, and a short interval (2s, vs. the 15s
+        production default) so the test doesn't have to wait out real
+        production timing to see a ping land."""
+        return (
+            self.build_aquifer(source)
+            .with_env_variable("AQUIFER_REGISTRY_URL", "http://canalis:8080/register")
+            .with_env_variable("AQUIFER_REGISTRY_INTERVAL_SECONDS", "2")
+        )
+
+    @function
+    async def test_registration(
+        self,
+        aquifer_source: dagger.Directory,
+        canalis_source: dagger.Directory,
+    ) -> str:
+        """Proves the real, end-to-end registration loop: a real Aquifer
+        instance, configured only via AQUIFER_REGISTRY_URL (no Canalis-
+        specific code on Aquifer's side -- see registration.go's own
+        docstring), pings a real Canalis instance, which writes a real
+        TTL'd key into a real Valkey -- checked by directly inspecting
+        Valkey's own state via valkey-cli, not by trusting either
+        service's HTTP response, since the actual claim under test is
+        "did the side effect land in the shared store," not "did a
+        request succeed."
+        """
+        valkey = self.build_valkey().with_exposed_port(6379).as_service()
+
+        canalis = (
+            self.build_canalis(canalis_source)
+            .with_service_binding("valkey", valkey)
+            .with_exposed_port(8080)
+            .as_service()
+        )
+
+        aquifer = (
+            self.build_aquifer_registration(aquifer_source)
+            .with_service_binding("canalis", canalis)
+            .with_exposed_port(8080)
+            .as_service()
+        )
+
+        # Bind all three services onto one checker container -- binding a
+        # service is what actually starts it in Dagger, so aquifer's own
+        # registration loop only begins running once this container
+        # references it. 6s covers the immediate first ping plus at least
+        # one full 2s-interval tick, comfortably.
+        result = await (
+            dag.container()
+            .from_("valkey/valkey:8")
+            .with_service_binding("valkey", valkey)
+            .with_service_binding("canalis", canalis)
+            .with_service_binding("aquifer", aquifer)
+            .with_exec(["sh", "-c", "sleep 6 && valkey-cli -h valkey keys 'canalis:instance:*'"])
+            .stdout()
+        )
+
+        if "canalis:instance:" not in result:
+            raise RuntimeError(
+                f"expected a canalis:instance:* key in Valkey after real Aquifer->Canalis "
+                f"registration pings, got: {result!r}"
+            )
+        return f"registration: PASS ({result.strip()})"
+
+    @function
     def build_recorder(self, recorder_dir: dagger.Directory) -> Container:
         """recorder_dir is this repo's own recorder/ directory -- NOT the
         backend source directory being tested. Kept as a distinct

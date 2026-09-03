@@ -6,6 +6,7 @@
 
 AQUIFER_SRC    ?= ../aquifer
 EZTHROTTLE_SRC ?= ../ezthrottle-local
+CANALIS_SRC    ?= ../canalis-rs
 
 help:
 	@echo "Aqueduct Runner -- cross-repo contract tests, called individually or all at once:"
@@ -18,6 +19,7 @@ help:
 	@echo "  make contract-test-ezthrottle-drain     drain-ledger test against ezthrottle-local"
 	@echo "  make contract-test-ezthrottle-admission admission-rejection test against ezthrottle-local"
 	@echo "  make contract-test-all                  everything, both backends"
+	@echo "  make contract-test-registration          real Aquifer->Canalis->Valkey registration ping"
 	@echo ""
 	@echo "  make recorder-up / recorder-down / recorder-logs   iterate on the recorder locally, no Dagger"
 
@@ -44,6 +46,9 @@ contract-test-ezthrottle-admission:
 
 contract-test-all:
 	dagger call test-all --aquifer-source=$(AQUIFER_SRC) --ezthrottle-source=$(EZTHROTTLE_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
+
+contract-test-registration:
+	dagger call test-registration --aquifer-source=$(AQUIFER_SRC) --canalis-source=$(CANALIS_SRC)
 
 # Local-loop helpers for iterating on the recorder without Dagger, matching
 # both source repos' existing start/stop + health-poll ergonomics.
