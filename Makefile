@@ -1,7 +1,8 @@
 .PHONY: help build-recorder \
         contract-test-aquifer contract-test-aquifer-drain contract-test-aquifer-admission \
         contract-test-aquifer-valkey-idempotency \
-        contract-test-ezthrottle contract-test-ezthrottle-drain contract-test-ezthrottle-admission \
+        contract-test-ezthrottle contract-test-ezthrottle-drain \
+        contract-test-ezthrottle-drain-batch contract-test-ezthrottle-admission \
         contract-test-all \
         recorder-up recorder-down recorder-logs clean
 
@@ -19,6 +20,7 @@ help:
 	@echo "  make contract-test-aquifer-admission    admission-rejection test against Aquifer"
 	@echo "  make contract-test-ezthrottle           full shared suite against ezthrottle-local"
 	@echo "  make contract-test-ezthrottle-drain     drain-ledger test against ezthrottle-local"
+	@echo "  make contract-test-ezthrottle-drain-batch periodic batch drain test against ezthrottle-local"
 	@echo "  make contract-test-ezthrottle-admission admission-rejection test against ezthrottle-local"
 	@echo "  make contract-test-all                  everything, both backends"
 	@echo "  make contract-test-registration          real Aquifer->Canalis->Valkey registration ping"
@@ -45,6 +47,9 @@ contract-test-ezthrottle:
 
 contract-test-ezthrottle-drain:
 	dagger call test-ezthrottle-drain --source=$(EZTHROTTLE_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
+
+contract-test-ezthrottle-drain-batch:
+	dagger call test-ezthrottle-drain-batch --source=$(EZTHROTTLE_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
 
 contract-test-ezthrottle-admission:
 	dagger call test-ezthrottle-admission --source=$(EZTHROTTLE_SRC) --hurl-dir=./hurl --recorder-dir=./recorder

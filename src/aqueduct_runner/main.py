@@ -56,6 +56,10 @@ _EZTHROTTLE_DRAIN_SUITE_FILES = [
     "shared/test_drain_ledger_ezthrottle.hurl",
 ]
 
+_EZTHROTTLE_DRAIN_BATCH_SUITE_FILES = [
+    "shared/test_drain_batch_ezthrottle.hurl",
+]
+
 # test_admission.hurl needs its own tiny-DB-ceiling container variant --
 # running it against the same container as _SUITE_FILES would risk
 # tripping (or nearly tripping) admission control from accumulated state
@@ -169,6 +173,28 @@ class AqueductRunner:
             .with_env_variable("EZTHROTTLE_DRAIN_ENABLED", "true")
             .with_env_variable("EZTHROTTLE_DRAIN_TIMER_SECONDS", "2")
             .with_env_variable("EZTHROTTLE_IDLE_TIMEOUT_MS", "30000")
+            .with_env_variable(
+                "EZTHROTTLE_DRAIN_WEBHOOK_URL",
+                f"http://recorder:{RECORDER_PORT}/drain-webhook",
+            )
+        )
+
+    @function
+    def build_ezthrottle_drain_batch(self, source: dagger.Directory) -> Container:
+        """ezthrottle-local drain mode with periodic batch streaming enabled.
+
+        The idle handoff timers stay long enough that the contract test can
+        distinguish a periodic ledger_batch webhook from the final idle
+        instance_idle flush.
+        """
+        return (
+            self.build_ezthrottle(source)
+            .with_env_variable("EZTHROTTLE_DRAIN_ENABLED", "true")
+            .with_env_variable("EZTHROTTLE_DRAIN_TIMER_SECONDS", "60")
+            .with_env_variable("EZTHROTTLE_IDLE_TIMEOUT_MS", "60000")
+            .with_env_variable("EZTHROTTLE_DRAIN_BATCH_ENABLED", "true")
+            .with_env_variable("EZTHROTTLE_DRAIN_BATCH_INTERVAL_SECONDS", "1")
+            .with_env_variable("EZTHROTTLE_DRAIN_BATCH_MAX_EVENTS", "10")
             .with_env_variable(
                 "EZTHROTTLE_DRAIN_WEBHOOK_URL",
                 f"http://recorder:{RECORDER_PORT}/drain-webhook",
@@ -631,6 +657,34 @@ print(json.dumps({{
         )
 
     @function
+    async def test_ezthrottle_drain_batch(
+        self,
+        source: dagger.Directory,
+        hurl_dir: dagger.Directory,
+        recorder_dir: dagger.Directory,
+    ) -> str:
+        """Named, individually-invocable: verifies ezthrottle-local's
+        periodic batch drain streaming path with a real container and real
+        drain webhook receiver."""
+        recorder = (
+            self.build_recorder(recorder_dir).with_exposed_port(RECORDER_PORT).as_service()
+        )
+        ez = (
+            self.build_ezthrottle_drain_batch(source)
+            .with_service_binding("recorder", recorder)
+            .with_exposed_port(4000)
+            .as_service()
+        )
+        return await self.run_hurl_files(
+            ez,
+            4000,
+            recorder,
+            hurl_dir,
+            _EZTHROTTLE_DRAIN_BATCH_SUITE_FILES,
+            extra_vars=_drain_vars(),
+        )
+
+    @function
     async def test_aquifer_admission(
         self,
         source: dagger.Directory,
@@ -705,6 +759,12 @@ print(json.dumps({{
             (
                 "ezthrottle-drain",
                 self.test_ezthrottle_drain(ezthrottle_source, hurl_dir, recorder_dir),
+            ),
+            (
+                "ezthrottle-drain-batch",
+                self.test_ezthrottle_drain_batch(
+                    ezthrottle_source, hurl_dir, recorder_dir
+                ),
             ),
             (
                 "ezthrottle-admission",
