@@ -29,6 +29,7 @@ make contract-test-aquifer             # full shared suite against Aquifer
 make contract-test-ezthrottle          # full shared suite against ezthrottle-local
 make contract-test-aquifer-admission   # admission-rejection test only
 make contract-test-aquifer-drain       # drain-ledger test only (~40s, see "Drain-mode timing" below)
+make contract-test-aquifer-valkey-idempotency # Aquifer + Valkey remote idempotency
 make contract-test-all                 # everything, both backends
 ```
 
@@ -54,6 +55,10 @@ plus a backend-specific pair for drain mode (see "Drain-mode timing" below for w
 - **`test_drain_ledger.hurl`** (Aquifer only) — a job's drain-mode ledger hash matches an
   independently precomputed SHA-256. Confirmed passing end-to-end at ~40s (see "Drain-mode timing"
   below).
+- **`test_aquifer_valkey_idempotency`** (Aquifer only, Dagger function) — starts Valkey plus two
+  Aquifer instances. One instance completes a job and writes
+  `aqueduct:idempotency:<hash>` through the Valkey drain sink; the other instance, with an empty
+  local DB, receives the same request and returns `duplicate:true` from the remote Valkey lookup.
 - **`test_drain_ledger_ezthrottle.hurl`** (ezthrottle-local only) — the identical check. Confirmed
   passing end-to-end at ~40s, now matching Aquifer's (see "Drain-mode timing" below for the fix that
   closed the gap); separate files because the two backends' idle-timeout env vars differ.

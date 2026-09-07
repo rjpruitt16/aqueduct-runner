@@ -28,6 +28,12 @@ _DRAIN_EXPECTED_HASH = hashlib.sha256(
     f"{_DRAIN_USER_ID}:{_DRAIN_IDEMPOTENT_KEY}".encode()
 ).hexdigest()
 
+_VALKEY_USER_ID = "valkey-user"
+_VALKEY_IDEMPOTENT_KEY = "valkey-key-fixed"
+_VALKEY_EXPECTED_HASH = hashlib.sha256(
+    f"{_VALKEY_USER_ID}:{_VALKEY_IDEMPOTENT_KEY}".encode()
+).hexdigest()
+
 _SUITE_FILES = [
     "shared/test_health.hurl",
     "shared/test_job_lifecycle.hurl",
@@ -98,6 +104,30 @@ class AqueductRunner:
                 "AQUIFER_DRAIN_WEBHOOK_URL",
                 f"http://recorder:{RECORDER_PORT}/drain-webhook",
             )
+        )
+
+    @function
+    def build_aquifer_valkey_idempotency(self, source: dagger.Directory) -> Container:
+        """Aquifer configured for generic Valkey remote idempotency.
+
+        The drain sink writes completed/failed job records to Valkey under
+        aqueduct:idempotency:<sha256(user_id:idempotent_key)>. Remote
+        idempotency lookup is also enabled, so a second Aquifer instance
+        with an empty local DB can reject a duplicate by checking Valkey
+        before dispatch.
+        """
+        return (
+            self.build_aquifer(source)
+            .with_env_variable("AQUIFER_DRAIN_ENABLED", "true")
+            .with_env_variable("AQUIFER_DRAIN_SINK", "valkey")
+            .with_env_variable("AQUIFER_DRAIN_BATCH_ENABLED", "true")
+            .with_env_variable("AQUIFER_DRAIN_BATCH_INTERVAL_SECONDS", "1")
+            .with_env_variable("AQUIFER_DRAIN_BATCH_MAX_EVENTS", "10")
+            .with_env_variable("AQUIFER_VALKEY_URL", "redis://valkey:6379")
+            .with_env_variable("AQUIFER_REMOTE_IDEMPOTENCY_ENABLED", "true")
+            .with_env_variable("AQUIFER_REMOTE_IDEMPOTENCY_TIMEOUT_MS", "250")
+            .with_env_variable("AQUIFER_REMOTE_IDEMPOTENCY_PREFIX", "aqueduct:idempotency:")
+            .with_env_variable("AQUIFER_REMOTE_IDEMPOTENCY_TTL_SECONDS", "7200")
         )
 
     @function
@@ -394,6 +424,156 @@ class AqueductRunner:
         )
 
     @function
+    async def test_aquifer_valkey_idempotency(
+        self,
+        source: dagger.Directory,
+        recorder_dir: dagger.Directory,
+    ) -> str:
+        """Real container test for Aquifer's generic Valkey idempotency.
+
+        Starts Valkey, a recorder fixture, and two separate Aquifer
+        instances. Aquifer A accepts and completes a job, streams its drain
+        event into Valkey, and Aquifer B then receives the same request with
+        an empty local DB. B must return duplicate:true from the remote
+        Valkey lookup instead of dispatching the job again.
+        """
+        valkey = self.build_valkey().with_exposed_port(6379).as_service()
+        recorder = (
+            self.build_recorder(recorder_dir).with_exposed_port(RECORDER_PORT).as_service()
+        )
+
+        aquifer_a = (
+            self.build_aquifer_valkey_idempotency(source)
+            .with_env_variable("DB_PATH", "/tmp/aquifer-a.db")
+            .with_env_variable("L8_KEY_PATH", "/tmp/aquifer-a.l8-key")
+            .with_service_binding("valkey", valkey)
+            .with_service_binding("recorder", recorder)
+            .with_exposed_port(8080)
+            .as_service()
+        )
+        aquifer_b = (
+            self.build_aquifer_valkey_idempotency(source)
+            .with_env_variable("DB_PATH", "/tmp/aquifer-b.db")
+            .with_env_variable("L8_KEY_PATH", "/tmp/aquifer-b.l8-key")
+            .with_service_binding("valkey", valkey)
+            .with_service_binding("recorder", recorder)
+            .with_exposed_port(8080)
+            .as_service()
+        )
+
+        script = f"""
+import hashlib
+import json
+import socket
+import time
+import urllib.error
+import urllib.request
+
+USER_ID = {_VALKEY_USER_ID!r}
+IDEMPOTENT_KEY = {_VALKEY_IDEMPOTENT_KEY!r}
+EXPECTED_HASH = {_VALKEY_EXPECTED_HASH!r}
+REMOTE_KEY = "aqueduct:idempotency:" + EXPECTED_HASH
+
+def request_json(method, url, body=None):
+    data = None
+    headers = {{}}
+    if body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, json.loads(resp.read().decode())
+    except urllib.error.HTTPError as err:
+        text = err.read().decode()
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            parsed = {{"raw": text}}
+        return err.code, parsed
+
+def valkey_get(key):
+    payload = f"*2\\r\\n$3\\r\\nGET\\r\\n${{len(key)}}\\r\\n{{key}}\\r\\n".encode()
+    with socket.create_connection(("valkey", 6379), timeout=5) as sock:
+        sock.settimeout(5)
+        sock.sendall(payload)
+        first = sock.recv(1)
+        line = b""
+        while not line.endswith(b"\\r\\n"):
+            line += sock.recv(1)
+        if first == b"$":
+            size = int(line[:-2])
+            if size < 0:
+                return None
+            data = b""
+            while len(data) < size + 2:
+                data += sock.recv(size + 2 - len(data))
+            return data[:size].decode()
+        if first == b"-":
+            raise RuntimeError(line.decode())
+        raise RuntimeError(f"unexpected RESP prefix {{first!r}} line={{line!r}}")
+
+request_json("POST", "http://recorder:5000/reset")
+request_json("POST", "http://recorder:5000/upstream/configure", {{"status": 200, "body": "{{\\"ok\\": true}}"}})
+
+job = {{
+    "user_id": USER_ID,
+    "idempotent_key": IDEMPOTENT_KEY,
+    "url": "http://recorder:5000/upstream/target",
+    "method": "POST",
+    "webhook_url": "http://recorder:5000/webhook",
+}}
+
+status, first = request_json("POST", "http://aquifer-a:8080/jobs", job)
+assert status == 201, (status, first)
+first_job_id = first["job_id"]
+
+deadline = time.time() + 20
+while time.time() < deadline:
+    status, webhook = request_json("GET", f"http://recorder:5000/webhooks/{{first_job_id}}")
+    if status == 200 and webhook.get("count") == 1 and webhook["webhook"]["json"]["status"] == "completed":
+        break
+    time.sleep(0.5)
+else:
+    raise RuntimeError("first job did not complete and deliver webhook")
+
+deadline = time.time() + 20
+while time.time() < deadline:
+    raw = valkey_get(REMOTE_KEY)
+    if raw:
+        remote = json.loads(raw)
+        if remote.get("job_id") == first_job_id and remote.get("status") == "completed":
+            break
+    time.sleep(0.5)
+else:
+    raise RuntimeError(f"Valkey never received expected {{REMOTE_KEY}} entry")
+
+status, second = request_json("POST", "http://aquifer-b:8080/jobs", job)
+assert status == 200, (status, second)
+assert second.get("duplicate") is True, second
+assert second.get("job_id") == first_job_id, second
+assert second.get("status") == "completed", second
+
+print(json.dumps({{
+    "result": "PASS",
+    "valkey_key": REMOTE_KEY,
+    "job_id": first_job_id,
+    "remote_duplicate_status": second["status"],
+}}, sort_keys=True))
+"""
+
+        return await (
+            dag.container()
+            .from_("python:3.12-alpine")
+            .with_service_binding("valkey", valkey)
+            .with_service_binding("recorder", recorder)
+            .with_service_binding("aquifer-a", aquifer_a)
+            .with_service_binding("aquifer-b", aquifer_b)
+            .with_exec(["python", "-c", script])
+            .stdout()
+        )
+
+    @function
     async def test_ezthrottle_drain(
         self,
         source: dagger.Directory,
@@ -487,6 +667,10 @@ class AqueductRunner:
         checks = (
             ("aquifer", self.test_aquifer(aquifer_source, hurl_dir, recorder_dir)),
             ("aquifer-drain", self.test_aquifer_drain(aquifer_source, hurl_dir, recorder_dir)),
+            (
+                "aquifer-valkey-idempotency",
+                self.test_aquifer_valkey_idempotency(aquifer_source, recorder_dir),
+            ),
             (
                 "aquifer-admission",
                 self.test_aquifer_admission(aquifer_source, hurl_dir, recorder_dir),
