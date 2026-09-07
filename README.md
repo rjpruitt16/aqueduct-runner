@@ -30,7 +30,7 @@ make contract-test-ezthrottle          # full shared suite against ezthrottle-lo
 make contract-test-aquifer-admission   # admission-rejection test only
 make contract-test-aquifer-drain       # drain-ledger test only (~40s, see "Drain-mode timing" below)
 make contract-test-aquifer-valkey-idempotency # Aquifer + Valkey remote idempotency
-make contract-test-ezthrottle-drain-batch # ezthrottle-local periodic batch drain streaming
+make contract-test-drain-batch-parity  # same batch drain contract against both backends
 make contract-test-all                 # everything, both backends
 ```
 
@@ -39,7 +39,7 @@ Every target is individually invocable — call just the piece you want, not one
 ## What's actually tested
 
 Eleven `.hurl` files under `hurl/shared/` — one shared suite run against both backends unmodified,
-plus a backend-specific pair for drain mode (see "Drain-mode timing" below for why):
+plus backend-specific drain timing checks and a shared drain batch parity check:
 
 - **`test_health.hurl`** — `/health` shape.
 - **`test_job_lifecycle.hurl`** — submit, poll status, confirm webhook delivery.
@@ -64,8 +64,9 @@ plus a backend-specific pair for drain mode (see "Drain-mode timing" below for w
 - **`test_drain_ledger_ezthrottle.hurl`** (ezthrottle-local only) — the identical check. Confirmed
   passing end-to-end at ~40s, now matching Aquifer's (see "Drain-mode timing" below for the fix that
   closed the gap); separate files because the two backends' idle-timeout env vars differ.
-- **`test_drain_batch_ezthrottle.hurl`** (ezthrottle-local only) — enables periodic batch streaming
-  and verifies a real `ledger_batch` drain webhook with sequence metadata before final idle handoff.
+- **`test_drain_batch.hurl`** (Aquifer and ezthrottle-local) — enables periodic batch streaming and
+  verifies the same real `ledger_batch` drain webhook shape with sequence metadata before final idle
+  handoff.
 
 ## The recorder
 
@@ -90,8 +91,8 @@ child (`AccountQueue`) has died and removes itself from the registry immediately
 out a second idle timeout of its own to reconfirm the same fact. That's why the two backends' timing
 matches despite ezthrottle-local's actor hierarchy having one more level than Aquifer's.
 
-`test-all` includes both drain checks; run the individual named targets for faster feedback on
-everything else.
+`test-all` includes both final idle drain checks and the shared batch-drain parity check; run the
+individual named targets for faster feedback on everything else.
 
 ## Repo structure
 

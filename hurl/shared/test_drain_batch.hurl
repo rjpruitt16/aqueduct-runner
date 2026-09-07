@@ -1,7 +1,7 @@
-# EZTHROTTLE-LOCAL. Proves drain batch streaming independently from final
-# idle handoff: the container variant enables EZTHROTTLE_DRAIN_BATCH_* with
-# a 1s interval, while keeping idle handoff slower so the first drain
-# webhook should be a ledger_batch event.
+# Shared drain batch contract. Runs against both Aquifer and
+# ezthrottle-local batch-drain container variants. It proves periodic
+# ledger streaming before final idle handoff by waiting for event:
+# ledger_batch from the drain webhook recorder.
 
 POST {{recorder_url}}/reset
 HTTP 200
@@ -48,4 +48,4 @@ jsonpath "$.ledger[0].sequence" isInteger
 jsonpath "$.ledger[0].idempotent_key_hash" == "{{expected_hash}}"
 jsonpath "$.ledger[0].job_id" == "{{job_id}}"
 jsonpath "$.ledger[0].status" == "completed"
-jsonpath "$.ledger[0].recorded_at" isString
+jsonpath "$.ledger[0].recorded_at" isInteger

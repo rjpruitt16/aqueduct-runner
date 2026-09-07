@@ -56,8 +56,8 @@ _EZTHROTTLE_DRAIN_SUITE_FILES = [
     "shared/test_drain_ledger_ezthrottle.hurl",
 ]
 
-_EZTHROTTLE_DRAIN_BATCH_SUITE_FILES = [
-    "shared/test_drain_batch_ezthrottle.hurl",
+_DRAIN_BATCH_SUITE_FILES = [
+    "shared/test_drain_batch.hurl",
 ]
 
 # test_admission.hurl needs its own tiny-DB-ceiling container variant --
@@ -104,6 +104,28 @@ class AqueductRunner:
             .with_env_variable("AQUIFER_DRAIN_ENABLED", "true")
             .with_env_variable("AQUIFER_DRAIN_TIMER_SECONDS", "2")
             .with_env_variable("AQUIFER_IDLE_TIMEOUT_SECONDS", "30")
+            .with_env_variable(
+                "AQUIFER_DRAIN_WEBHOOK_URL",
+                f"http://recorder:{RECORDER_PORT}/drain-webhook",
+            )
+        )
+
+    @function
+    def build_aquifer_drain_batch(self, source: dagger.Directory) -> Container:
+        """Aquifer drain mode with periodic webhook batch streaming enabled.
+
+        Idle handoff stays slower than the batch interval so the shared
+        contract observes event=ledger_batch before the final instance_idle
+        flush can fire.
+        """
+        return (
+            self.build_aquifer(source)
+            .with_env_variable("AQUIFER_DRAIN_ENABLED", "true")
+            .with_env_variable("AQUIFER_DRAIN_TIMER_SECONDS", "60")
+            .with_env_variable("AQUIFER_IDLE_TIMEOUT_SECONDS", "60")
+            .with_env_variable("AQUIFER_DRAIN_BATCH_ENABLED", "true")
+            .with_env_variable("AQUIFER_DRAIN_BATCH_INTERVAL_SECONDS", "1")
+            .with_env_variable("AQUIFER_DRAIN_BATCH_MAX_EVENTS", "10")
             .with_env_variable(
                 "AQUIFER_DRAIN_WEBHOOK_URL",
                 f"http://recorder:{RECORDER_PORT}/drain-webhook",
@@ -680,9 +702,68 @@ print(json.dumps({{
             4000,
             recorder,
             hurl_dir,
-            _EZTHROTTLE_DRAIN_BATCH_SUITE_FILES,
+            _DRAIN_BATCH_SUITE_FILES,
             extra_vars=_drain_vars(),
         )
+
+    @function
+    async def test_aquifer_drain_batch(
+        self,
+        source: dagger.Directory,
+        hurl_dir: dagger.Directory,
+        recorder_dir: dagger.Directory,
+    ) -> str:
+        """Named, individually-invocable: verifies Aquifer's periodic batch
+        drain streaming path with the same shared Hurl contract used for
+        ezthrottle-local."""
+        recorder = (
+            self.build_recorder(recorder_dir).with_exposed_port(RECORDER_PORT).as_service()
+        )
+        aquifer = (
+            self.build_aquifer_drain_batch(source)
+            .with_service_binding("recorder", recorder)
+            .with_exposed_port(8080)
+            .as_service()
+        )
+        return await self.run_hurl_files(
+            aquifer,
+            8080,
+            recorder,
+            hurl_dir,
+            _DRAIN_BATCH_SUITE_FILES,
+            extra_vars=_drain_vars(),
+        )
+
+    @function
+    async def test_drain_batch_parity(
+        self,
+        aquifer_source: dagger.Directory,
+        ezthrottle_source: dagger.Directory,
+        hurl_dir: dagger.Directory,
+        recorder_dir: dagger.Directory,
+    ) -> str:
+        """Runs the same drain-batch contract against Aquifer and
+        ezthrottle-local, proving the wire payload has parity."""
+        checks = (
+            (
+                "aquifer-drain-batch",
+                self.test_aquifer_drain_batch(aquifer_source, hurl_dir, recorder_dir),
+            ),
+            (
+                "ezthrottle-drain-batch",
+                self.test_ezthrottle_drain_batch(
+                    ezthrottle_source, hurl_dir, recorder_dir
+                ),
+            ),
+        )
+        lines = []
+        for name, coro in checks:
+            try:
+                await coro
+                lines.append(f"{name}: PASS")
+            except dagger.ExecError as e:
+                lines.append(f"{name}: FAIL\n{e.stdout}\n{e.stderr}")
+        return "\n\n".join(lines)
 
     @function
     async def test_aquifer_admission(
@@ -750,6 +831,10 @@ print(json.dumps({{
             (
                 "aquifer-valkey-idempotency",
                 self.test_aquifer_valkey_idempotency(aquifer_source, recorder_dir),
+            ),
+            (
+                "aquifer-drain-batch",
+                self.test_aquifer_drain_batch(aquifer_source, hurl_dir, recorder_dir),
             ),
             (
                 "aquifer-admission",

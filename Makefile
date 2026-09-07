@@ -2,7 +2,8 @@
         contract-test-aquifer contract-test-aquifer-drain contract-test-aquifer-admission \
         contract-test-aquifer-valkey-idempotency \
         contract-test-ezthrottle contract-test-ezthrottle-drain \
-        contract-test-ezthrottle-drain-batch contract-test-ezthrottle-admission \
+        contract-test-aquifer-drain-batch contract-test-ezthrottle-drain-batch \
+        contract-test-drain-batch-parity contract-test-ezthrottle-admission \
         contract-test-all \
         recorder-up recorder-down recorder-logs clean
 
@@ -16,11 +17,13 @@ help:
 	@echo "  make build-recorder                    build+sanity-check just the recorder fixture"
 	@echo "  make contract-test-aquifer              full shared suite against Aquifer"
 	@echo "  make contract-test-aquifer-drain        drain-ledger test against Aquifer"
+	@echo "  make contract-test-aquifer-drain-batch  periodic batch drain test against Aquifer"
 	@echo "  make contract-test-aquifer-valkey-idempotency Aquifer + Valkey remote idempotency"
 	@echo "  make contract-test-aquifer-admission    admission-rejection test against Aquifer"
 	@echo "  make contract-test-ezthrottle           full shared suite against ezthrottle-local"
 	@echo "  make contract-test-ezthrottle-drain     drain-ledger test against ezthrottle-local"
 	@echo "  make contract-test-ezthrottle-drain-batch periodic batch drain test against ezthrottle-local"
+	@echo "  make contract-test-drain-batch-parity   same batch drain contract against both backends"
 	@echo "  make contract-test-ezthrottle-admission admission-rejection test against ezthrottle-local"
 	@echo "  make contract-test-all                  everything, both backends"
 	@echo "  make contract-test-registration          real Aquifer->Canalis->Valkey registration ping"
@@ -36,6 +39,9 @@ contract-test-aquifer:
 contract-test-aquifer-drain:
 	dagger call test-aquifer-drain --source=$(AQUIFER_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
 
+contract-test-aquifer-drain-batch:
+	dagger call test-aquifer-drain-batch --source=$(AQUIFER_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
+
 contract-test-aquifer-valkey-idempotency:
 	dagger call test-aquifer-valkey-idempotency --source=$(AQUIFER_SRC) --recorder-dir=./recorder
 
@@ -50,6 +56,9 @@ contract-test-ezthrottle-drain:
 
 contract-test-ezthrottle-drain-batch:
 	dagger call test-ezthrottle-drain-batch --source=$(EZTHROTTLE_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
+
+contract-test-drain-batch-parity:
+	dagger call test-drain-batch-parity --aquifer-source=$(AQUIFER_SRC) --ezthrottle-source=$(EZTHROTTLE_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
 
 contract-test-ezthrottle-admission:
 	dagger call test-ezthrottle-admission --source=$(EZTHROTTLE_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
