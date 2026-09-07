@@ -469,6 +469,7 @@ import hashlib
 import json
 import socket
 import time
+import urllib.parse
 import urllib.error
 import urllib.request
 
@@ -565,6 +566,11 @@ assert stored_result.get("response_status") == 200, stored_result
 assert stored_result.get("content_type") == "application/json", stored_result
 assert stored_result.get("body") == '{{"ok": true}}', stored_result
 assert stored_result.get("body_truncated") in (None, False), stored_result
+
+query = urllib.parse.urlencode({{"user_id": USER_ID, "idempotent_key": IDEMPOTENT_KEY}})
+status, retrieved_result = request_json("GET", f"http://aquifer-b:8080/results?{{query}}")
+assert status == 200, (status, retrieved_result)
+assert retrieved_result == stored_result, retrieved_result
 
 status, second = request_json("POST", "http://aquifer-b:8080/jobs", job)
 assert status == 200, (status, second)
