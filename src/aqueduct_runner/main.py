@@ -128,6 +128,9 @@ class AqueductRunner:
             .with_env_variable("AQUIFER_REMOTE_IDEMPOTENCY_TIMEOUT_MS", "250")
             .with_env_variable("AQUIFER_REMOTE_IDEMPOTENCY_PREFIX", "aqueduct:idempotency:")
             .with_env_variable("AQUIFER_REMOTE_IDEMPOTENCY_TTL_SECONDS", "7200")
+            .with_env_variable("AQUIFER_REMOTE_RESULT_ENABLED", "true")
+            .with_env_variable("AQUIFER_REMOTE_RESULT_PREFIX", "aqueduct:result:")
+            .with_env_variable("AQUIFER_REMOTE_RESULT_MAX_BYTES", "65536")
         )
 
     @function
@@ -473,6 +476,7 @@ USER_ID = {_VALKEY_USER_ID!r}
 IDEMPOTENT_KEY = {_VALKEY_IDEMPOTENT_KEY!r}
 EXPECTED_HASH = {_VALKEY_EXPECTED_HASH!r}
 REMOTE_KEY = "aqueduct:idempotency:" + EXPECTED_HASH
+RESULT_KEY = "aqueduct:result:" + EXPECTED_HASH
 
 def request_json(method, url, body=None):
     data = None
@@ -542,23 +546,39 @@ while time.time() < deadline:
     raw = valkey_get(REMOTE_KEY)
     if raw:
         remote = json.loads(raw)
-        if remote.get("job_id") == first_job_id and remote.get("status") == "completed":
+        if (
+            remote.get("job_id") == first_job_id
+            and remote.get("status") == "completed"
+            and remote.get("result_key") == RESULT_KEY
+        ):
             break
     time.sleep(0.5)
 else:
     raise RuntimeError(f"Valkey never received expected {{REMOTE_KEY}} entry")
+
+raw_result = valkey_get(RESULT_KEY)
+assert raw_result, f"Valkey never received expected {{RESULT_KEY}} entry"
+stored_result = json.loads(raw_result)
+assert stored_result.get("job_id") == first_job_id, stored_result
+assert stored_result.get("status") == "completed", stored_result
+assert stored_result.get("response_status") == 200, stored_result
+assert stored_result.get("content_type") == "application/json", stored_result
+assert stored_result.get("body") == '{{"ok": true}}', stored_result
+assert stored_result.get("body_truncated") in (None, False), stored_result
 
 status, second = request_json("POST", "http://aquifer-b:8080/jobs", job)
 assert status == 200, (status, second)
 assert second.get("duplicate") is True, second
 assert second.get("job_id") == first_job_id, second
 assert second.get("status") == "completed", second
+assert second.get("result_key") == RESULT_KEY, second
 
 print(json.dumps({{
     "result": "PASS",
-    "valkey_key": REMOTE_KEY,
     "job_id": first_job_id,
     "remote_duplicate_status": second["status"],
+    "result_key": RESULT_KEY,
+    "valkey_key": REMOTE_KEY,
 }}, sort_keys=True))
 """
 

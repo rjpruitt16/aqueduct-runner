@@ -57,8 +57,9 @@ plus a backend-specific pair for drain mode (see "Drain-mode timing" below for w
   below).
 - **`test_aquifer_valkey_idempotency`** (Aquifer only, Dagger function) — starts Valkey plus two
   Aquifer instances. One instance completes a job and writes
-  `aqueduct:idempotency:<hash>` through the Valkey drain sink; the other instance, with an empty
-  local DB, receives the same request and returns `duplicate:true` from the remote Valkey lookup.
+  `aqueduct:idempotency:<hash>` plus `aqueduct:result:<hash>` through the Valkey sink; the other
+  instance, with an empty local DB, receives the same request and returns `duplicate:true` from the
+  remote Valkey lookup.
 - **`test_drain_ledger_ezthrottle.hurl`** (ezthrottle-local only) — the identical check. Confirmed
   passing end-to-end at ~40s, now matching Aquifer's (see "Drain-mode timing" below for the fix that
   closed the gap); separate files because the two backends' idle-timeout env vars differ.
