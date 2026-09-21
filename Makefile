@@ -1,6 +1,7 @@
 .PHONY: help build-recorder \
         contract-test-aquifer contract-test-aquifer-drain contract-test-aquifer-admission \
         contract-test-aquifer-valkey-idempotency \
+        contract-test-aquifer-websocket \
         contract-test-ezthrottle contract-test-ezthrottle-drain \
         contract-test-aquifer-drain-batch contract-test-ezthrottle-drain-batch \
         contract-test-drain-batch-parity contract-test-ezthrottle-admission \
@@ -19,6 +20,7 @@ help:
 	@echo "  make contract-test-aquifer-drain        drain-ledger test against Aquifer"
 	@echo "  make contract-test-aquifer-drain-batch  periodic batch drain test against Aquifer"
 	@echo "  make contract-test-aquifer-valkey-idempotency Aquifer + Valkey remote idempotency"
+	@echo "  make contract-test-aquifer-websocket    Aquifer + Valkey WebSocket proxy contract"
 	@echo "  make contract-test-aquifer-admission    admission-rejection test against Aquifer"
 	@echo "  make contract-test-ezthrottle           full shared suite against ezthrottle-local"
 	@echo "  make contract-test-ezthrottle-drain     drain-ledger test against ezthrottle-local"
@@ -45,6 +47,9 @@ contract-test-aquifer-drain-batch:
 contract-test-aquifer-valkey-idempotency:
 	dagger call test-aquifer-valkey-idempotency --source=$(AQUIFER_SRC) --recorder-dir=./recorder
 
+contract-test-aquifer-websocket:
+	dagger call test-aquifer-websocket --source=$(AQUIFER_SRC) --websocket-dir=./websocket
+
 contract-test-aquifer-admission:
 	dagger call test-aquifer-admission --source=$(AQUIFER_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
 
@@ -64,7 +69,7 @@ contract-test-ezthrottle-admission:
 	dagger call test-ezthrottle-admission --source=$(EZTHROTTLE_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
 
 contract-test-all:
-	dagger call test-all --aquifer-source=$(AQUIFER_SRC) --ezthrottle-source=$(EZTHROTTLE_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
+	dagger call test-all --aquifer-source=$(AQUIFER_SRC) --ezthrottle-source=$(EZTHROTTLE_SRC) --hurl-dir=./hurl --recorder-dir=./recorder --websocket-dir=./websocket
 
 contract-test-registration:
 	dagger call test-registration --aquifer-source=$(AQUIFER_SRC) --canalis-source=$(CANALIS_SRC)
