@@ -250,6 +250,38 @@ class AqueductRunner:
         return dag.container().from_("valkey/valkey:8")
 
     @function
+    def build_websocket_fixture(self, websocket_dir: dagger.Directory) -> Container:
+        """Builds the neutral WebSocket backend and protocol client used by
+        the Aquifer container contract. Hurl does not support upgraded
+        WebSocket sessions, so this fixture exercises the same boundary with
+        a small Go client and server instead."""
+        return dag.container().build(websocket_dir)
+
+    @function
+    def build_aquifer_websocket(self, source: dagger.Directory) -> Container:
+        """Aquifer with its opt-in WebSocket proxy enabled.
+
+        The limits are intentionally small: they belong to this one Aquifer
+        process, while a deployment's total capacity is the sum of all
+        instances. The fixture backend advertises a lower upstream ceiling to
+        prove that dynamic capacity can reduce, but never raise, this local
+        operator ceiling.
+        """
+        return (
+            self.build_aquifer(source)
+            .with_env_variable("AQUIFER_WS_ENABLED", "true")
+            .with_env_variable("AQUIFER_VALKEY_URL", "redis://valkey:6379")
+            .with_env_variable("AQUIFER_ALLOWED_URL_DOMAINS", "backend")
+            .with_env_variable("AQUIFER_WS_MAX_CLIENT_CONNECTIONS", "2")
+            .with_env_variable("AQUIFER_WS_MAX_UPSTREAM_CONNECTIONS", "4")
+            .with_env_variable("AQUIFER_WS_MAX_WAITING_CONNECTIONS", "4")
+            .with_env_variable("AQUIFER_WS_CONNECT_RPS", "50")
+            .with_env_variable("AQUIFER_WS_READ_BLOCK_MS", "100")
+            .with_env_variable("AQUIFER_WS_HANDSHAKE_TIMEOUT_SECONDS", "3")
+            .with_env_variable("AQUIFER_WS_RECONNECT_MAX_SECONDS", "2")
+        )
+
+    @function
     def build_canalis(self, source: dagger.Directory) -> Container:
         """canalis-rs's own Dockerfile, unmodified. CANALIS_VALKEY_URL is
         the one piece of config that has to change per-environment (it
@@ -328,6 +360,49 @@ class AqueductRunner:
                 f"registration pings, got: {result!r}"
             )
         return f"registration: PASS ({result.strip()})"
+
+    @function
+    async def test_aquifer_websocket(
+        self,
+        source: dagger.Directory,
+        websocket_dir: dagger.Directory,
+    ) -> str:
+        """Runs Aquifer, Valkey, and a real upstream WebSocket server.
+
+        The client checks durable ordering and one-to-many causation, cursor
+        replay, automatic upstream reconnect, backend capacity feedback,
+        local waiting/rejection behavior, forwarded gateway identity, and
+        the underlying Valkey transcript.
+        """
+        valkey = self.build_valkey().with_exposed_port(6379).as_service()
+        fixture = self.build_websocket_fixture(websocket_dir)
+        backend = fixture.with_exposed_port(6060).as_service()
+        aquifer = (
+            self.build_aquifer_websocket(source)
+            .with_service_binding("valkey", valkey)
+            .with_service_binding("backend", backend)
+            .with_exposed_port(8080)
+            .as_service()
+        )
+        return await (
+            fixture
+            .with_service_binding("valkey", valkey)
+            .with_service_binding("backend", backend)
+            .with_service_binding("aquifer", aquifer)
+            .with_exec(
+                [
+                    "/websocket-fixture",
+                    "test",
+                    "--aquifer",
+                    "ws://aquifer:8080/websocket",
+                    "--backend",
+                    "ws://backend:6060/socket",
+                    "--valkey",
+                    "valkey:6379",
+                ]
+            )
+            .stdout()
+        )
 
     @function
     def build_recorder(self, recorder_dir: dagger.Directory) -> Container:
@@ -816,6 +891,7 @@ print(json.dumps({{
         ezthrottle_source: dagger.Directory,
         hurl_dir: dagger.Directory,
         recorder_dir: dagger.Directory,
+        websocket_dir: dagger.Directory,
     ) -> str:
         """Runs the full suite against both backends, aggregating
         pass/fail per backend rather than stopping at the first failure.
@@ -831,6 +907,10 @@ print(json.dumps({{
             (
                 "aquifer-valkey-idempotency",
                 self.test_aquifer_valkey_idempotency(aquifer_source, recorder_dir),
+            ),
+            (
+                "aquifer-websocket",
+                self.test_aquifer_websocket(aquifer_source, websocket_dir),
             ),
             (
                 "aquifer-drain-batch",

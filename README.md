@@ -30,6 +30,7 @@ make contract-test-ezthrottle          # full shared suite against ezthrottle-lo
 make contract-test-aquifer-admission   # admission-rejection test only
 make contract-test-aquifer-drain       # drain-ledger test only (~40s, see "Drain-mode timing" below)
 make contract-test-aquifer-valkey-idempotency # Aquifer + Valkey remote idempotency
+make contract-test-aquifer-websocket   # Aquifer + Valkey WebSocket proxy contract
 make contract-test-drain-batch-parity  # same batch drain contract against both backends
 make contract-test-all                 # everything, both backends
 ```
@@ -61,6 +62,10 @@ plus backend-specific drain timing checks and a shared drain batch parity check:
   `aqueduct:idempotency:<hash>` plus `aqueduct:result:<hash>` through the Valkey sink; the other
   instance, with an empty local DB, receives the same request and returns `duplicate:true` from the
   remote Valkey lookup.
+- **`test_aquifer_websocket`** (Aquifer only, Dagger function) — starts a real Aquifer container,
+  Valkey, and an upstream WebSocket fixture. It verifies durable command/event ordering,
+  one-to-many event correlation, cursor replay, automatic reconnect, dynamic capacity reduction,
+  per-instance waiting and rejection limits, gateway-header forwarding, and the raw Valkey stream.
 - **`test_drain_ledger_ezthrottle.hurl`** (ezthrottle-local only) — the identical check. Confirmed
   passing end-to-end at ~40s, now matching Aquifer's (see "Drain-mode timing" below for the fix that
   closed the gap); separate files because the two backends' idle-timeout env vars differ.
@@ -103,6 +108,7 @@ aqueduct-runner/
     src/aqueduct_runner/main.py
   hurl/shared/*.hurl       # the ten contract-test files, above
   recorder/                # the Flask fixture service
+  websocket/               # WebSocket backend + protocol client fixture
 ```
 
 ## What's reused vs. new
