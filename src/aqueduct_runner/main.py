@@ -259,7 +259,7 @@ class AqueductRunner:
 
     @function
     def build_aquifer_websocket(self, source: dagger.Directory) -> Container:
-        """Aquifer with its opt-in WebSocket proxy enabled.
+        """Aquifer with its Valkey-backed WebSocket proxy enabled.
 
         The limits are intentionally small: they belong to this one Aquifer
         process, while a deployment's total capacity is the sum of all
@@ -271,10 +271,12 @@ class AqueductRunner:
             self.build_aquifer(source)
             .with_env_variable("AQUIFER_VALKEY_URL", "redis://valkey:6379")
             .with_env_variable("AQUIFER_ALLOWED_URL_DOMAINS", "backend")
-            .with_env_variable("AQUIFER_WS_MAX_CLIENT_CONNECTIONS", "2")
+            .with_env_variable("AQUIFER_WS_MAX_CLIENT_CONNECTIONS", "3")
             .with_env_variable("AQUIFER_WS_MAX_UPSTREAM_CONNECTIONS", "4")
             .with_env_variable("AQUIFER_WS_MAX_WAITING_CONNECTIONS", "4")
             .with_env_variable("AQUIFER_WS_CONNECT_RPS", "50")
+            .with_env_variable("AQUIFER_WS_SLOW_START_RPS", "1")
+            .with_env_variable("AQUIFER_WS_STREAM_TTL_SECONDS", "3")
             .with_env_variable("AQUIFER_WS_READ_BLOCK_MS", "100")
             .with_env_variable("AQUIFER_WS_HANDSHAKE_TIMEOUT_SECONDS", "3")
             .with_env_variable("AQUIFER_WS_RECONNECT_MAX_SECONDS", "2")

@@ -64,8 +64,9 @@ plus backend-specific drain timing checks and a shared drain batch parity check:
   remote Valkey lookup.
 - **`test_aquifer_websocket`** (Aquifer only, Dagger function) — starts a real Aquifer container,
   Valkey, and an upstream WebSocket fixture. It verifies durable command/event ordering,
-  one-to-many event correlation, cursor replay, automatic reconnect, dynamic capacity reduction,
-  per-instance waiting and rejection limits, gateway-header forwarding, and the raw Valkey stream.
+  one-to-many event correlation, cursor replay, slow-start connection pacing, automatic reconnect,
+  live queue positions, per-instance waiting and rejection limits, gateway-header forwarding, and
+  the raw Valkey stream with expiration.
 - **`test_drain_ledger_ezthrottle.hurl`** (ezthrottle-local only) — the identical check. Confirmed
   passing end-to-end at ~40s, now matching Aquifer's (see "Drain-mode timing" below for the fix that
   closed the gap); separate files because the two backends' idle-timeout env vars differ.
