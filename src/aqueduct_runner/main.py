@@ -269,7 +269,6 @@ class AqueductRunner:
         """
         return (
             self.build_aquifer(source)
-            .with_env_variable("AQUIFER_WS_ENABLED", "true")
             .with_env_variable("AQUIFER_VALKEY_URL", "redis://valkey:6379")
             .with_env_variable("AQUIFER_ALLOWED_URL_DOMAINS", "backend")
             .with_env_variable("AQUIFER_WS_MAX_CLIENT_CONNECTIONS", "2")
