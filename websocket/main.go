@@ -74,8 +74,13 @@ func serveBackend() {
 			http.Error(w, "missing session id", http.StatusBadRequest)
 			return
 		}
+		mode := r.URL.Query().Get("mode")
 		responseHeaders := http.Header{}
-		responseHeaders.Set("X-Aqueduct-WS-Max-Connections", "1")
+		maxConnections := "1"
+		if mode == "slow-start" {
+			maxConnections = "4"
+		}
+		responseHeaders.Set("X-Aqueduct-WS-Max-Connections", maxConnections)
 		responseHeaders.Set("X-Aqueduct-WS-Connect-Rps", "50")
 		conn, err := upgrader.Upgrade(w, r, responseHeaders)
 		if err != nil {
@@ -83,13 +88,12 @@ func serveBackend() {
 		}
 		defer conn.Close()
 
-		mode := r.URL.Query().Get("mode")
 		switch mode {
 		case "basic":
 			serveBasic(conn)
 		case "reconnect":
 			serveReconnect(conn, sessionID)
-		case "hold":
+		case "hold", "slow-start":
 			for {
 				if _, _, err := conn.ReadMessage(); err != nil {
 					return
@@ -169,6 +173,9 @@ func runContract(args []string) error {
 			Subprotocols:     []string{subprotocol},
 		},
 	}
+	if err := c.testSlowStart(); err != nil {
+		return fmt.Errorf("slow start: %w", err)
+	}
 	if err := c.testDurabilityAndReplay(); err != nil {
 		return fmt.Errorf("durability and replay: %w", err)
 	}
@@ -178,7 +185,32 @@ func runContract(args []string) error {
 	if err := c.testPerNodeLimits(); err != nil {
 		return fmt.Errorf("per-node limits: %w", err)
 	}
-	fmt.Println(`{"result":"PASS","checks":["durable_ordering","cursor_replay","upstream_reconnect","per_node_limits","valkey_transcript"]}`)
+	fmt.Println(`{"result":"PASS","checks":["slow_start","durable_ordering","cursor_replay","upstream_reconnect","live_queue_positions","per_node_limits","valkey_transcript","stream_ttl"]}`)
+	return nil
+}
+
+func (c *contractClient) testSlowStart() error {
+	first, err := c.dialReady("runner-slow-start-1", "0-0", "slow-start")
+	if err != nil {
+		return err
+	}
+	defer closeSocket(first)
+	if err := waitForStatus(first, "connected", 5*time.Second); err != nil {
+		return err
+	}
+
+	started := time.Now()
+	second, err := c.dialReady("runner-slow-start-2", "0-0", "slow-start")
+	if err != nil {
+		return err
+	}
+	defer closeSocket(second)
+	if err := waitForStatus(second, "connected", 5*time.Second); err != nil {
+		return err
+	}
+	if elapsed := time.Since(started); elapsed < 700*time.Millisecond {
+		return fmt.Errorf("second upstream opened after %v; expected initial 1 RPS slow-start pacing", elapsed)
+	}
 	return nil
 }
 
@@ -297,6 +329,14 @@ func (c *contractClient) testDurabilityAndReplay() error {
 	if length != int64(4) {
 		return fmt.Errorf("expected four durable transcript entries, got %#v", length)
 	}
+	ttl, err := c.redisCommand("TTL", key)
+	if err != nil {
+		return err
+	}
+	ttlSeconds, ok := ttl.(int64)
+	if !ok || ttlSeconds <= 0 || ttlSeconds > 3 {
+		return fmt.Errorf("expected sliding stream TTL in (0,3], got %#v", ttl)
+	}
 	raw, err := c.redisCommand("XRANGE", key, "-", "+")
 	if err != nil {
 		return err
@@ -306,6 +346,20 @@ func (c *contractClient) testDurabilityAndReplay() error {
 		if !strings.Contains(flat, expected) {
 			return fmt.Errorf("Valkey transcript missing %q: %s", expected, flat)
 		}
+	}
+	expiresBy := time.Now().Add(5 * time.Second)
+	for {
+		exists, err := c.redisCommand("EXISTS", key)
+		if err != nil {
+			return err
+		}
+		if exists == int64(0) {
+			break
+		}
+		if time.Now().After(expiresBy) {
+			return fmt.Errorf("Valkey stream %s did not expire after its idle TTL", key)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 	return nil
 }
@@ -352,49 +406,55 @@ func (c *contractClient) testPerNodeLimits() error {
 		first.Close()
 		return err
 	}
-	if err := waitForStatus(second, "waiting", 5*time.Second); err != nil {
+	if err := waitForWaitingPosition(second, 1, 5*time.Second); err != nil {
 		first.Close()
 		second.Close()
 		return err
 	}
-
-	third, response, err := c.dial("runner-limit-3", "0-0", "hold")
-	if third != nil {
+	third, err := c.dialReady("runner-limit-3", "0-0", "hold")
+	if err != nil {
+		first.Close()
+		second.Close()
+		return err
+	}
+	if err := waitForWaitingPosition(third, 2, 5*time.Second); err != nil {
+		first.Close()
+		second.Close()
 		third.Close()
+		return err
+	}
+
+	fourth, response, err := c.dial("runner-limit-4", "0-0", "hold")
+	if fourth != nil {
+		fourth.Close()
 	}
 	if err == nil || response == nil || response.StatusCode != http.StatusTooManyRequests {
 		first.Close()
 		second.Close()
-		return fmt.Errorf("third local client should be rejected with 429, response=%v err=%v", response, err)
+		third.Close()
+		return fmt.Errorf("fourth local client should be rejected with 429, response=%v err=%v", response, err)
 	}
 	if response.Header.Get("Retry-After") == "" {
 		first.Close()
 		second.Close()
+		third.Close()
 		return errors.New("429 response did not include Retry-After")
 	}
 	response.Body.Close()
 
-	connected := make(chan error, 1)
-	go func() { connected <- waitForStatus(second, "connected", 5*time.Second) }()
-	select {
-	case err := <-connected:
-		first.Close()
-		second.Close()
-		return fmt.Errorf("second upstream connected before the first released the advertised slot: %v", err)
-	case <-time.After(350 * time.Millisecond):
-	}
-	closeSocket(first)
-	select {
-	case err := <-connected:
-		if err != nil {
-			second.Close()
-			return err
-		}
-	case <-time.After(5 * time.Second):
-		second.Close()
-		return errors.New("second upstream did not receive the released local slot")
-	}
 	closeSocket(second)
+	if err := waitForWaitingPosition(third, 1, 5*time.Second); err != nil {
+		first.Close()
+		third.Close()
+		return fmt.Errorf("third client did not advance after second left the queue: %w", err)
+	}
+
+	closeSocket(first)
+	if err := waitForStatus(third, "connected", 5*time.Second); err != nil {
+		third.Close()
+		return errors.New("third upstream did not receive the released local slot")
+	}
+	closeSocket(third)
 	return nil
 }
 
@@ -406,6 +466,19 @@ func waitForStatus(conn *websocket.Conn, state string, timeout time.Duration) er
 			return err
 		}
 		if message.Type == "status" && message.State == state {
+			return nil
+		}
+	}
+}
+
+func waitForWaitingPosition(conn *websocket.Conn, position int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		message, err := readEnvelope(conn, time.Until(deadline))
+		if err != nil {
+			return err
+		}
+		if message.Type == "status" && message.State == "waiting" && message.Position == position {
 			return nil
 		}
 	}
