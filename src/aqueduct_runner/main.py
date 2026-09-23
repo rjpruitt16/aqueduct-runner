@@ -406,6 +406,39 @@ class AqueductRunner:
         )
 
     @function
+    async def test_aquifer_shutdown(
+        self,
+        source: dagger.Directory,
+        websocket_dir: dagger.Directory,
+    ) -> str:
+        """Sends SIGTERM to the real Aquifer binary inside a test container.
+
+        Proves readiness/liveness transitions, rejection of new work,
+        completion of an accepted job and webhook, WebSocket handoff and
+        close code 1012, external-registration lifecycle, final ledger
+        flush, durable transcript retention, and bounded process exit.
+        """
+        valkey = self.build_valkey().with_exposed_port(6379).as_service()
+        fixture = self.build_websocket_fixture(websocket_dir)
+        aquifer_binary = self.build_aquifer(source).file("/app/aquifer")
+        return await (
+            fixture
+            .with_file("/aquifer", aquifer_binary, permissions=0o755)
+            .with_service_binding("valkey", valkey)
+            .with_exec(
+                [
+                    "/websocket-fixture",
+                    "shutdown-test",
+                    "--aquifer-process",
+                    "/aquifer",
+                    "--valkey",
+                    "valkey:6379",
+                ]
+            )
+            .stdout()
+        )
+
+    @function
     def build_recorder(self, recorder_dir: dagger.Directory) -> Container:
         """recorder_dir is this repo's own recorder/ directory -- NOT the
         backend source directory being tested. Kept as a distinct
@@ -912,6 +945,10 @@ print(json.dumps({{
             (
                 "aquifer-websocket",
                 self.test_aquifer_websocket(aquifer_source, websocket_dir),
+            ),
+            (
+                "aquifer-shutdown",
+                self.test_aquifer_shutdown(aquifer_source, websocket_dir),
             ),
             (
                 "aquifer-drain-batch",

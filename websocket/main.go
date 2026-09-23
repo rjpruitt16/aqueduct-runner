@@ -45,7 +45,7 @@ var backendConnections = struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		log.Fatal("usage: websocket-fixture server|test")
+		log.Fatal("usage: websocket-fixture server|test|shutdown-test")
 	}
 	switch os.Args[1] {
 	case "server":
@@ -54,17 +54,27 @@ func main() {
 		if err := runContract(os.Args[2:]); err != nil {
 			log.Fatal(err)
 		}
+	case "shutdown-test":
+		if err := runShutdownContract(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
 	default:
 		log.Fatalf("unknown mode %q", os.Args[1])
 	}
 }
 
 func serveBackend() {
+	log.Print("websocket fixture listening on :6060")
+	log.Fatal(http.ListenAndServe(":6060", newBackendMux()))
+}
+
+func newBackendMux() *http.ServeMux {
+	mux := http.NewServeMux()
 	upgrader := websocket.Upgrader{
 		Subprotocols: []string{subprotocol},
 		CheckOrigin:  func(*http.Request) bool { return true },
 	}
-	http.HandleFunc("/socket", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/socket", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer gateway-auth" {
 			http.Error(w, "missing forwarded gateway identity", http.StatusUnauthorized)
 			return
@@ -103,8 +113,7 @@ func serveBackend() {
 			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "unknown mode"), time.Now().Add(time.Second))
 		}
 	})
-	log.Print("websocket fixture listening on :6060")
-	log.Fatal(http.ListenAndServe(":6060", nil))
+	return mux
 }
 
 func serveBasic(conn *websocket.Conn) {
