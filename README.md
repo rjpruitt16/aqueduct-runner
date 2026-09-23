@@ -31,6 +31,7 @@ make contract-test-aquifer-admission   # admission-rejection test only
 make contract-test-aquifer-drain       # drain-ledger test only (~40s, see "Drain-mode timing" below)
 make contract-test-aquifer-valkey-idempotency # Aquifer + Valkey remote idempotency
 make contract-test-aquifer-websocket   # Aquifer + Valkey WebSocket proxy contract
+make contract-test-aquifer-shutdown    # real SIGTERM drain + WebSocket handoff
 make contract-test-drain-batch-parity  # same batch drain contract against both backends
 make contract-test-all                 # everything, both backends
 ```
@@ -67,6 +68,11 @@ plus backend-specific drain timing checks and a shared drain batch parity check:
   one-to-many event correlation, cursor replay, slow-start connection pacing, automatic reconnect,
   live queue positions, per-instance waiting and rejection limits, gateway-header forwarding, and
   the raw Valkey stream with expiration.
+- **`test_aquifer_shutdown`** (Aquifer only, Dagger function) — sends a real `SIGTERM` to the
+  production Aquifer binary with an accepted job and WebSocket still active. It verifies draining
+  readiness and HTTP/WebSocket admission, completion webhook delivery, `server_draining` plus close code 1012,
+  `active -> draining -> offline` registration, final ledger flush, transcript retention, and
+  bounded process exit.
 - **`test_drain_ledger_ezthrottle.hurl`** (ezthrottle-local only) — the identical check. Confirmed
   passing end-to-end at ~40s, now matching Aquifer's (see "Drain-mode timing" below for the fix that
   closed the gap); separate files because the two backends' idle-timeout env vars differ.
