@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -13,6 +14,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -191,9 +194,8 @@ func runShutdownContract(args []string) error {
 	}
 
 	client := &contractClient{
-		aquiferURL: "ws://127.0.0.1:8080/websocket",
+		targetURL:  "ws://127.0.0.1:8080/websocket",
 		backendURL: "ws://127.0.0.1:6060/socket",
-		valkeyAddr: *valkeyAddr,
 		dialer: websocket.Dialer{
 			HandshakeTimeout: 5 * time.Second,
 			Subprotocols:     []string{subprotocol},
@@ -282,11 +284,11 @@ func runShutdownContract(args []string) error {
 	if !state.hasRegistrationSequence("active", "draining", "offline") {
 		return errors.New("registration did not report active -> draining -> offline")
 	}
-	length, err := client.redisCommand("XLEN", webSocketStreamKey("runner-shutdown"))
+	length, err := redisInteger(*valkeyAddr, "XLEN", webSocketStreamKey("runner-shutdown"))
 	if err != nil {
 		return fmt.Errorf("read shutdown transcript: %w", err)
 	}
-	if count, ok := length.(int64); !ok || count < 1 {
+	if length < 1 {
 		return fmt.Errorf("durable WebSocket transcript was lost during shutdown: %#v", length)
 	}
 	if response, requestErr := httpClient.Get("http://127.0.0.1:8080/ready"); requestErr == nil {
@@ -296,6 +298,34 @@ func runShutdownContract(args []string) error {
 
 	fmt.Printf(`{"result":"PASS","checks":["sigterm","readiness","admission_rejection","accepted_job_drain","completion_webhook","websocket_handoff","websocket_admission_rejection","close_1012","registration_lifecycle","final_ledger_flush","durable_transcript","bounded_exit"],"shutdown_ms":%d}`+"\n", elapsed.Milliseconds())
 	return nil
+}
+
+func redisInteger(address string, args ...string) (int64, error) {
+	conn, err := net.DialTimeout("tcp", address, 3*time.Second)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+
+	var request bytes.Buffer
+	fmt.Fprintf(&request, "*%d\r\n", len(args))
+	for _, arg := range args {
+		fmt.Fprintf(&request, "$%d\r\n%s\r\n", len(arg), arg)
+	}
+	if _, err := conn.Write(request.Bytes()); err != nil {
+		return 0, err
+	}
+
+	line, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		return 0, err
+	}
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, ":") {
+		return 0, fmt.Errorf("expected Redis integer response, got %q", line)
+	}
+	return strconv.ParseInt(strings.TrimPrefix(line, ":"), 10, 64)
 }
 
 func assertDrainingWebSocket(client *contractClient) error {

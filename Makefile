@@ -2,7 +2,8 @@
         contract-test-aquifer contract-test-aquifer-drain contract-test-aquifer-admission \
         contract-test-aquifer-valkey-idempotency \
         contract-test-aquifer-valkey-cluster \
-        contract-test-aquifer-websocket contract-test-aquifer-shutdown \
+        contract-test-aquifer-websocket contract-test-ezthrottle-websocket \
+        contract-test-websocket-parity contract-test-aquifer-shutdown \
         contract-test-ezthrottle contract-test-ezthrottle-drain \
         contract-test-aquifer-drain-batch contract-test-ezthrottle-drain-batch \
         contract-test-drain-batch-parity contract-test-ezthrottle-admission \
@@ -23,6 +24,8 @@ help:
 	@echo "  make contract-test-aquifer-valkey-idempotency Aquifer + Valkey remote idempotency"
 	@echo "  make contract-test-aquifer-valkey-cluster Aquifer + Valkey load-aware rendezvous"
 	@echo "  make contract-test-aquifer-websocket    Aquifer + Valkey WebSocket proxy contract"
+	@echo "  make contract-test-ezthrottle-websocket same WebSocket proxy contract against ezthrottle-local"
+	@echo "  make contract-test-websocket-parity     one WebSocket contract against both implementations"
 	@echo "  make contract-test-aquifer-shutdown     real SIGTERM drain and WebSocket handoff contract"
 	@echo "  make contract-test-aquifer-admission    admission-rejection test against Aquifer"
 	@echo "  make contract-test-ezthrottle           full shared suite against ezthrottle-local"
@@ -55,6 +58,12 @@ contract-test-aquifer-valkey-cluster:
 
 contract-test-aquifer-websocket:
 	dagger call test-aquifer-websocket --source=$(AQUIFER_SRC) --websocket-dir=./websocket
+
+contract-test-ezthrottle-websocket:
+	dagger call test-ezthrottle-websocket --source=$(EZTHROTTLE_SRC) --websocket-dir=./websocket
+
+contract-test-websocket-parity:
+	dagger call test-websocket-parity --aquifer-source=$(AQUIFER_SRC) --ezthrottle-source=$(EZTHROTTLE_SRC) --websocket-dir=./websocket
 
 contract-test-aquifer-shutdown:
 	dagger call test-aquifer-shutdown --source=$(AQUIFER_SRC) --websocket-dir=./websocket

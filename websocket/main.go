@@ -1,17 +1,11 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -159,24 +153,21 @@ func serveReconnect(conn *websocket.Conn, sessionID string) {
 }
 
 type contractClient struct {
-	aquiferURL string
+	targetURL  string
 	backendURL string
-	valkeyAddr string
 	dialer     websocket.Dialer
 }
 
 func runContract(args []string) error {
 	flags := flag.NewFlagSet("test", flag.ContinueOnError)
-	aquiferURL := flags.String("aquifer", "ws://aquifer:8080/websocket", "Aquifer WebSocket endpoint")
+	targetURL := flags.String("target", "ws://target:8080/websocket", "WebSocket endpoint under test")
 	backendURL := flags.String("backend", "ws://backend:6060/socket", "fixture backend endpoint")
-	valkeyAddr := flags.String("valkey", "valkey:6379", "Valkey address")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	c := &contractClient{
-		aquiferURL: *aquiferURL,
+		targetURL:  *targetURL,
 		backendURL: *backendURL,
-		valkeyAddr: *valkeyAddr,
 		dialer: websocket.Dialer{
 			HandshakeTimeout: 5 * time.Second,
 			Subprotocols:     []string{subprotocol},
@@ -194,7 +185,7 @@ func runContract(args []string) error {
 	if err := c.testPerNodeLimits(); err != nil {
 		return fmt.Errorf("per-node limits: %w", err)
 	}
-	fmt.Println(`{"result":"PASS","checks":["slow_start","durable_ordering","cursor_replay","upstream_reconnect","live_queue_positions","per_node_limits","valkey_transcript","stream_ttl"]}`)
+	fmt.Println(`{"result":"PASS","checks":["slow_start","durable_ordering","cursor_replay","upstream_reconnect","live_queue_positions","per_node_limits","stream_ttl"]}`)
 	return nil
 }
 
@@ -224,7 +215,7 @@ func (c *contractClient) testSlowStart() error {
 }
 
 func (c *contractClient) dial(sessionID, after, mode string) (*websocket.Conn, *http.Response, error) {
-	endpoint, err := url.Parse(c.aquiferURL)
+	endpoint, err := url.Parse(c.targetURL)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -310,7 +301,6 @@ func (c *contractClient) testDurabilityAndReplay() error {
 	if err != nil {
 		return fmt.Errorf("reconnect for replay: %w", err)
 	}
-	defer closeSocket(replay)
 	var replayed []envelope
 	deadline = time.Now().Add(5 * time.Second)
 	for {
@@ -326,50 +316,23 @@ func (c *contractClient) testDurabilityAndReplay() error {
 		}
 	}
 	if len(replayed) != 1 || replayed[0].MessageID != "event-2-command-1" || replayed[0].StreamID != second.StreamID {
+		closeSocket(replay)
 		return fmt.Errorf("expected only the unseen second event, got %#v", replayed)
 	}
+	closeSocket(replay)
 
-	keyHash := sha256.Sum256([]byte("runner-basic"))
-	key := "aqueduct:ws:" + hex.EncodeToString(keyHash[:])
-	length, err := c.redisCommand("XLEN", key)
-	if err != nil {
-		return err
+	// Both implementations configure a three-second sliding transcript TTL in
+	// the container contract. Verify the public replay behavior instead of
+	// reaching into either Valkey or Mnesia from this shared test.
+	time.Sleep(4 * time.Second)
+	expired, response, err := c.dial("runner-basic", second.StreamID, "basic")
+	if expired != nil {
+		closeSocket(expired)
 	}
-	if length != int64(4) {
-		return fmt.Errorf("expected four durable transcript entries, got %#v", length)
+	if err == nil || response == nil || response.StatusCode != http.StatusConflict {
+		return fmt.Errorf("expired replay cursor should be rejected with 409, response=%v err=%v", response, err)
 	}
-	ttl, err := c.redisCommand("TTL", key)
-	if err != nil {
-		return err
-	}
-	ttlSeconds, ok := ttl.(int64)
-	if !ok || ttlSeconds <= 0 || ttlSeconds > 3 {
-		return fmt.Errorf("expected sliding stream TTL in (0,3], got %#v", ttl)
-	}
-	raw, err := c.redisCommand("XRANGE", key, "-", "+")
-	if err != nil {
-		return err
-	}
-	flat := strings.Join(flattenRESP(raw), " ")
-	for _, expected := range []string{"direction client", "direction backend", "command-1", "ack-command-1", "event-1-command-1", "event-2-command-1"} {
-		if !strings.Contains(flat, expected) {
-			return fmt.Errorf("Valkey transcript missing %q: %s", expected, flat)
-		}
-	}
-	expiresBy := time.Now().Add(5 * time.Second)
-	for {
-		exists, err := c.redisCommand("EXISTS", key)
-		if err != nil {
-			return err
-		}
-		if exists == int64(0) {
-			break
-		}
-		if time.Now().After(expiresBy) {
-			return fmt.Errorf("Valkey stream %s did not expire after its idle TTL", key)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	response.Body.Close()
 	return nil
 }
 
@@ -528,84 +491,4 @@ func streamIDLess(left, right string) bool {
 	lms, lseq, lok := parse(left)
 	rms, rseq, rok := parse(right)
 	return lok && rok && (lms < rms || lms == rms && lseq < rseq)
-}
-
-func (c *contractClient) redisCommand(args ...string) (any, error) {
-	conn, err := net.DialTimeout("tcp", c.valkeyAddr, 3*time.Second)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
-	var request bytes.Buffer
-	fmt.Fprintf(&request, "*%d\r\n", len(args))
-	for _, arg := range args {
-		fmt.Fprintf(&request, "$%d\r\n%s\r\n", len(arg), arg)
-	}
-	if _, err := conn.Write(request.Bytes()); err != nil {
-		return nil, err
-	}
-	return readRESP(bufio.NewReader(conn))
-}
-
-func readRESP(reader *bufio.Reader) (any, error) {
-	prefix, err := reader.ReadByte()
-	if err != nil {
-		return nil, err
-	}
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		return nil, err
-	}
-	line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
-	switch prefix {
-	case '+':
-		return line, nil
-	case '-':
-		return nil, errors.New(line)
-	case ':':
-		return strconv.ParseInt(line, 10, 64)
-	case '$':
-		size, err := strconv.Atoi(line)
-		if err != nil || size < 0 {
-			return nil, err
-		}
-		data := make([]byte, size+2)
-		if _, err := io.ReadFull(reader, data); err != nil {
-			return nil, err
-		}
-		return string(data[:size]), nil
-	case '*':
-		count, err := strconv.Atoi(line)
-		if err != nil || count < 0 {
-			return nil, err
-		}
-		values := make([]any, count)
-		for i := range values {
-			values[i], err = readRESP(reader)
-			if err != nil {
-				return nil, err
-			}
-		}
-		return values, nil
-	default:
-		return nil, fmt.Errorf("unsupported RESP prefix %q", prefix)
-	}
-}
-
-func flattenRESP(value any) []string {
-	switch typed := value.(type) {
-	case string:
-		return []string{typed}
-	case int64:
-		return []string{strconv.FormatInt(typed, 10)}
-	case []any:
-		var flattened []string
-		for _, child := range typed {
-			flattened = append(flattened, flattenRESP(child)...)
-		}
-		return flattened
-	default:
-		return nil
-	}
 }
