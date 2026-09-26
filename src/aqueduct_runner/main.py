@@ -757,6 +757,37 @@ print(json.dumps({{
         )
 
     @function
+    async def test_aquifer_valkey_cluster(self, source: dagger.Directory) -> str:
+        """Runs Aquifer's coordinated rendezvous contract against real Valkey.
+
+        The Go integration test races concurrent claims for one user, checks
+        sticky ownership across a stale membership view, spills new users away
+        from a node at capacity, removes a draining owner, and confirms the
+        availability-first fallback once every active node is full.
+        """
+        valkey = self.build_valkey().with_exposed_port(6379).as_service()
+        return await (
+            dag.container()
+            .from_("golang:1.25-alpine")
+            .with_directory("/src", source)
+            .with_workdir("/src")
+            .with_service_binding("valkey", valkey)
+            .with_env_variable("AQUIFER_TEST_VALKEY_URL", "redis://valkey:6379")
+            .with_exec(
+                [
+                    "go",
+                    "test",
+                    ".",
+                    "-count=1",
+                    "-run",
+                    "^TestValkeyClusterConcurrentClaimsCapacityAndDraining$",
+                    "-v",
+                ]
+            )
+            .stdout()
+        )
+
+    @function
     async def test_ezthrottle_drain(
         self,
         source: dagger.Directory,
@@ -941,6 +972,10 @@ print(json.dumps({{
             (
                 "aquifer-valkey-idempotency",
                 self.test_aquifer_valkey_idempotency(aquifer_source, recorder_dir),
+            ),
+            (
+                "aquifer-valkey-cluster",
+                self.test_aquifer_valkey_cluster(aquifer_source),
             ),
             (
                 "aquifer-websocket",

@@ -30,6 +30,7 @@ make contract-test-ezthrottle          # full shared suite against ezthrottle-lo
 make contract-test-aquifer-admission   # admission-rejection test only
 make contract-test-aquifer-drain       # drain-ledger test only (~40s, see "Drain-mode timing" below)
 make contract-test-aquifer-valkey-idempotency # Aquifer + Valkey remote idempotency
+make contract-test-aquifer-valkey-cluster # Aquifer + Valkey load-aware rendezvous
 make contract-test-aquifer-websocket   # Aquifer + Valkey WebSocket proxy contract
 make contract-test-aquifer-shutdown    # real SIGTERM drain + WebSocket handoff
 make contract-test-drain-batch-parity  # same batch drain contract against both backends
@@ -63,6 +64,9 @@ plus backend-specific drain timing checks and a shared drain batch parity check:
   `aqueduct:idempotency:<hash>` plus `aqueduct:result:<hash>` through the Valkey sink; the other
   instance, with an empty local DB, receives the same request and returns `duplicate:true` from the
   remote Valkey lookup.
+- **`test_aquifer_valkey_cluster`** (Aquifer only, Dagger function) — runs concurrent ownership
+  claims against real Valkey, then verifies sticky ownership, active-user capacity spillover,
+  draining-node replacement, and availability-first overflow behavior.
 - **`test_aquifer_websocket`** (Aquifer only, Dagger function) — starts a real Aquifer container,
   Valkey, and an upstream WebSocket fixture. It verifies durable command/event ordering,
   one-to-many event correlation, cursor replay, slow-start connection pacing, automatic reconnect,
