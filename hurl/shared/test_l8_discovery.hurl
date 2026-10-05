@@ -3,7 +3,7 @@
 GET {{target_url}}/.well-known/l8
 HTTP 200
 [Asserts]
-jsonpath "$.protocol_version" == "0.1"
+jsonpath "$.protocol_version" == "0.2"
 jsonpath "$.service_name" isString
 jsonpath "$.public_key" isString
 jsonpath "$.challenge_endpoint" == "/l8/challenge"
