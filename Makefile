@@ -1,6 +1,6 @@
 .PHONY: help build-recorder \
         contract-test-aquifer contract-test-aquifer-drain contract-test-aquifer-admission \
-        contract-test-aquifer-valkey-idempotency \
+        contract-test-aquifer-valkey-idempotency contract-test-aquifer-valkey-shared-idempotency \
         contract-test-aquifer-valkey-cluster \
         contract-test-aquifer-websocket contract-test-ezthrottle-websocket \
         contract-test-websocket-parity contract-test-aquifer-shutdown \
@@ -23,6 +23,7 @@ help:
 	@echo "  make contract-test-aquifer-drain-batch  periodic batch drain test against Aquifer"
 	@echo "  make contract-test-aquifer-valkey-idempotency Aquifer + Valkey remote idempotency"
 	@echo "  make contract-test-aquifer-valkey-cluster Aquifer + Valkey load-aware rendezvous"
+	@echo "  make contract-test-aquifer-valkey-shared-idempotency shared-scope keys across two Aquifers + Valkey"
 	@echo "  make contract-test-aquifer-websocket    Aquifer + Valkey WebSocket proxy contract"
 	@echo "  make contract-test-ezthrottle-websocket same WebSocket proxy contract against ezthrottle-local"
 	@echo "  make contract-test-websocket-parity     one WebSocket contract against both implementations"
@@ -55,6 +56,9 @@ contract-test-aquifer-valkey-idempotency:
 
 contract-test-aquifer-valkey-cluster:
 	dagger call test-aquifer-valkey-cluster --source=$(AQUIFER_SRC)
+
+contract-test-aquifer-valkey-shared-idempotency:
+	dagger call test-aquifer-valkey-shared-idempotency --source=$(AQUIFER_SRC) --recorder-dir=./recorder
 
 contract-test-aquifer-websocket:
 	dagger call test-aquifer-websocket --source=$(AQUIFER_SRC) --websocket-dir=./websocket

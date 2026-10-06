@@ -34,6 +34,8 @@ _VALKEY_EXPECTED_HASH = hashlib.sha256(
     f"{_VALKEY_USER_ID}:{_VALKEY_IDEMPOTENT_KEY}".encode()
 ).hexdigest()
 
+_SHARED_TTL_SECONDS = 120
+
 _SUITE_FILES = [
     "shared/test_health.hurl",
     "shared/test_job_lifecycle.hurl",
@@ -846,6 +848,201 @@ print(json.dumps({{
         )
 
     @function
+    async def test_aquifer_valkey_shared_idempotency(
+        self,
+        source: dagger.Directory,
+        recorder_dir: dagger.Directory,
+    ) -> str:
+        """Real container test for idempotency_scope=shared across two
+        independent Aquifer instances sharing one Valkey.
+
+        1. agent-a completes a shared job on Aquifer A. Valkey stores the
+           entry and result under sha256("shared\\0" + key), with the
+           overridden TTL. Aquifer B serves that result to /results without
+           a user_id, and agent-b's shared request on B is a duplicate of
+           agent-a's job. A per-user request with the same key is not.
+        2. Two instances race on a new shared key with a slow upstream. Both
+           miss Valkey and both dispatch (they are independent, not one
+           cluster), so both write: the last write wins and the surviving
+           entry and result each point at one of the two real jobs.
+        """
+        valkey = self.build_valkey().with_exposed_port(6379).as_service()
+        recorder = (
+            self.build_recorder(recorder_dir).with_exposed_port(RECORDER_PORT).as_service()
+        )
+
+        def aquifer(name: str):
+            return (
+                self.build_aquifer_valkey_idempotency(source)
+                .with_env_variable("AQUIFER_SHARED_IDEMPOTENCY_ENABLED", "true")
+                .with_env_variable(
+                    "AQUIFER_REMOTE_IDEMPOTENCY_TTL_SECONDS", str(_SHARED_TTL_SECONDS)
+                )
+                .with_env_variable("DB_PATH", f"/tmp/{name}.db")
+                .with_env_variable("L8_KEY_PATH", f"/tmp/{name}.l8-key")
+                .with_service_binding("valkey", valkey)
+                .with_service_binding("recorder", recorder)
+                .with_exposed_port(8080)
+                .as_service()
+            )
+
+        script = f"""
+import hashlib
+import json
+import socket
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+TTL = {_SHARED_TTL_SECONDS}
+
+def shared_hash(key):
+    return hashlib.sha256(("shared\\0" + key).encode()).hexdigest()
+
+def request_json(method, url, body=None):
+    data = None
+    headers = {{}}
+    if body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.status, json.loads(resp.read().decode())
+    except urllib.error.HTTPError as err:
+        text = err.read().decode()
+        try:
+            return err.code, json.loads(text)
+        except ValueError:
+            return err.code, {{"raw": text}}
+
+def valkey(*args):
+    payload = f"*{{len(args)}}\\r\\n".encode()
+    for arg in args:
+        arg = str(arg).encode()
+        payload += b"$" + str(len(arg)).encode() + b"\\r\\n" + arg + b"\\r\\n"
+    with socket.create_connection(("valkey", 6379), timeout=5) as sock:
+        sock.sendall(payload)
+        reader = sock.makefile("rb")
+        line = reader.readline()
+        prefix, rest = line[:1], line[1:-2]
+        if prefix == b":":
+            return int(rest)
+        if prefix == b"$":
+            size = int(rest)
+            return None if size < 0 else reader.read(size + 2)[:size].decode()
+        if prefix == b"+":
+            return rest.decode()
+        raise RuntimeError(f"valkey error {{line!r}}")
+
+def wait_completed(job_id, timeout=30):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        status, hook = request_json("GET", f"http://recorder:5000/webhooks/{{job_id}}")
+        if status == 200 and hook.get("count", 0) >= 1 and hook["webhook"]["json"]["status"] == "completed":
+            return
+        time.sleep(0.5)
+    raise RuntimeError(f"job {{job_id}} never completed")
+
+def wait_for(key, predicate, timeout=30):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        raw = valkey("GET", key)
+        if raw and predicate(json.loads(raw)):
+            return json.loads(raw)
+        time.sleep(0.5)
+    raise RuntimeError(f"{{key}} never matched; last value {{valkey('GET', key)!r}}")
+
+def assert_ttl(key):
+    ttl = valkey("TTL", key)
+    assert 0 < ttl <= TTL, (key, ttl)
+    return ttl
+
+def job(user_id, key, scope="shared"):
+    body = {{
+        "user_id": user_id,
+        "idempotent_key": key,
+        "url": "http://recorder:5000/upstream/target",
+        "method": "POST",
+        "webhook_url": "http://recorder:5000/webhook",
+    }}
+    if scope:
+        body["idempotency_scope"] = scope
+    return body
+
+request_json("POST", "http://recorder:5000/reset")
+request_json("POST", "http://recorder:5000/upstream/configure", {{"status": 200, "body": "{{\\"ok\\": true}}"}})
+
+# ---- 1. shared result crosses instances and users ----
+KEY1 = "weather:sf:shared-contract"
+H1 = shared_hash(KEY1)
+status, first = request_json("POST", "http://aquifer-a:8080/jobs", job("agent-a", KEY1))
+assert status == 201, (status, first)
+wait_completed(first["job_id"])
+
+entry = wait_for("aqueduct:idempotency:" + H1, lambda e: e.get("job_id") == first["job_id"] and e.get("status") == "completed")
+assert entry.get("result_key") == "aqueduct:result:" + H1, entry
+stored = wait_for("aqueduct:result:" + H1, lambda r: r.get("job_id") == first["job_id"])
+ttls = [assert_ttl("aqueduct:idempotency:" + H1), assert_ttl("aqueduct:result:" + H1)]
+
+query = urllib.parse.urlencode({{"idempotency_scope": "shared", "idempotent_key": KEY1}})
+status, fetched = request_json("GET", f"http://aquifer-b:8080/results?{{query}}")
+assert status == 200 and fetched == stored, (status, fetched, stored)
+
+status, joined = request_json("POST", "http://aquifer-b:8080/jobs", job("agent-b", KEY1))
+assert status == 200 and joined.get("duplicate") is True and joined.get("job_id") == first["job_id"], (status, joined)
+
+status, own = request_json("POST", "http://aquifer-b:8080/jobs", job("agent-b", KEY1, scope=None))
+assert status == 201 and own["job_id"] != first["job_id"], (status, own)
+
+# ---- 2. concurrent writes from two instances: last write wins ----
+request_json("POST", "http://recorder:5000/upstream/configure", {{"status": 200, "body": "{{\\"ok\\": true}}", "delay_ms": 2000}})
+KEY2 = "weather:nyc:race-contract"
+H2 = shared_hash(KEY2)
+results = {{}}
+def submit(node, user):
+    results[node] = request_json("POST", f"http://{{node}}:8080/jobs", job(user, KEY2))
+threads = [threading.Thread(target=submit, args=("aquifer-a", "agent-a")),
+           threading.Thread(target=submit, args=("aquifer-b", "agent-b"))]
+for t in threads: t.start()
+for t in threads: t.join()
+(code_a, race_a), (code_b, race_b) = results["aquifer-a"], results["aquifer-b"]
+assert code_a == 201 and code_b == 201 and race_a["job_id"] != race_b["job_id"], results
+race_ids = {{race_a["job_id"], race_b["job_id"]}}
+wait_completed(race_a["job_id"])
+wait_completed(race_b["job_id"])
+time.sleep(3)  # let both drain batches flush
+
+entry2 = wait_for("aqueduct:idempotency:" + H2, lambda e: e.get("job_id") in race_ids)
+result2 = wait_for("aqueduct:result:" + H2, lambda r: r.get("job_id") in race_ids)
+assert entry2["status"] == "completed" and result2["response_status"] == 200, (entry2, result2)
+assert_ttl("aqueduct:idempotency:" + H2)
+assert_ttl("aqueduct:result:" + H2)
+
+print(json.dumps({{
+    "result": "PASS",
+    "shared_job_id": first["job_id"],
+    "ttls": ttls,
+    "race_jobs": sorted(race_ids),
+    "race_entry_job": entry2["job_id"],
+    "race_result_job": result2["job_id"],
+}}, sort_keys=True))
+"""
+
+        return await (
+            dag.container()
+            .from_("python:3.12-alpine")
+            .with_service_binding("valkey", valkey)
+            .with_service_binding("recorder", recorder)
+            .with_service_binding("aquifer-a", aquifer("aquifer-a"))
+            .with_service_binding("aquifer-b", aquifer("aquifer-b"))
+            .with_exec(["python", "-c", script])
+            .stdout()
+        )
+
+    @function
     async def test_ezthrottle_drain(
         self,
         source: dagger.Directory,
@@ -1034,6 +1231,10 @@ print(json.dumps({{
             (
                 "aquifer-valkey-cluster",
                 self.test_aquifer_valkey_cluster(aquifer_source),
+            ),
+            (
+                "aquifer-valkey-shared-idempotency",
+                self.test_aquifer_valkey_shared_idempotency(aquifer_source, recorder_dir),
             ),
             (
                 "aquifer-websocket",
