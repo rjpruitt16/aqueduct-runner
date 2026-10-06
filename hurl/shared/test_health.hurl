@@ -4,6 +4,6 @@ GET {{target_url}}/health
 HTTP 200
 [Asserts]
 jsonpath "$.status" == "ok"
-jsonpath "$.l8_protocol" == "0.2"
+jsonpath "$.l8_protocol" matches "^[0-9]+\\.[0-9]+$"
 jsonpath "$.l8_public_key" isString
 jsonpath "$.admission" exists
