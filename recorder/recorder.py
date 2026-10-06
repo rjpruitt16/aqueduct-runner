@@ -37,6 +37,10 @@ state = {
     "upstream_config": {"status": 200, "body": '{"ok": true}', "headers": {}, "delay_ms": 0},
     "webhooks": {},  # job_id -> {"json": ..., "headers": ..., "received_at": ...}
     "drain_webhooks": [],  # list of {"ledger": [...], "flushed_at": ..., "received_at": ...}
+    # Optional scripted responses for /upstream/target, consumed in order; the
+    # last entry repeats. Each entry overrides status/headers of upstream_config.
+    "upstream_script": [],
+    "upstream_hits": [],  # monotonic seconds of each /upstream/target request
 }
 
 
@@ -105,13 +109,27 @@ def configure_upstream():
             "headers": body.get("headers", {}),
             "delay_ms": body.get("delay_ms", 0),
         }
+        state["upstream_script"] = list(body.get("script", []))
+        state["upstream_hits"] = []
     return jsonify({"configured": True})
+
+
+@app.get("/upstream/hits")
+def upstream_hits():
+    with lock:
+        return jsonify({"count": len(state["upstream_hits"]), "at": state["upstream_hits"]})
 
 
 @app.route("/upstream/target", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
 def upstream_target():
     with lock:
         cfg = dict(state["upstream_config"])
+        state["upstream_hits"].append(time.monotonic())
+        script = state["upstream_script"]
+        if script:
+            step = script.pop(0) if len(script) > 1 else script[0]
+            cfg["status"] = step.get("status", cfg["status"])
+            cfg["headers"] = step.get("headers", cfg["headers"])
     if cfg["delay_ms"]:
         time.sleep(cfg["delay_ms"] / 1000.0)
     resp = app.response_class(cfg["body"], status=cfg["status"])
@@ -165,6 +183,8 @@ def reset():
         state["webhooks"].clear()
         state["drain_webhooks"].clear()
         state["upstream_config"] = {"status": 200, "body": '{"ok": true}', "headers": {}, "delay_ms": 0}
+        state["upstream_script"] = []
+        state["upstream_hits"] = []
     return jsonify({"status": "reset"})
 
 

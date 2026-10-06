@@ -5,6 +5,7 @@
         contract-test-aquifer-websocket contract-test-ezthrottle-websocket \
         contract-test-websocket-parity contract-test-aquifer-shutdown \
         contract-test-ezthrottle contract-test-ezthrottle-drain \
+        contract-test-ezthrottle-shutdown contract-test-ezthrottle-cluster \
         contract-test-aquifer-drain-batch contract-test-ezthrottle-drain-batch \
         contract-test-drain-batch-parity contract-test-ezthrottle-admission \
         contract-test-all \
@@ -30,6 +31,8 @@ help:
 	@echo "  make contract-test-aquifer-shutdown     real SIGTERM drain and WebSocket handoff contract"
 	@echo "  make contract-test-aquifer-admission    admission-rejection test against Aquifer"
 	@echo "  make contract-test-ezthrottle           full shared suite against ezthrottle-local"
+	@echo "  make contract-test-ezthrottle-shutdown  real SIGTERM drain against the ezthrottle-local release"
+	@echo "  make contract-test-ezthrottle-cluster   two clustered ezthrottle-local nodes: shared + per-user dedup"
 	@echo "  make contract-test-ezthrottle-drain     drain-ledger test against ezthrottle-local"
 	@echo "  make contract-test-ezthrottle-drain-batch periodic batch drain test against ezthrottle-local"
 	@echo "  make contract-test-drain-batch-parity   same batch drain contract against both backends"
@@ -112,3 +115,9 @@ recorder-logs:
 
 clean: recorder-down
 	@rm -f /tmp/aqueduct_runner_recorder.log
+
+contract-test-ezthrottle-shutdown:
+	dagger call test-ezthrottle-shutdown --source=$(EZTHROTTLE_SRC) --recorder-dir=./recorder
+
+contract-test-ezthrottle-cluster:
+	dagger call test-ezthrottle-cluster --source=$(EZTHROTTLE_SRC) --recorder-dir=./recorder

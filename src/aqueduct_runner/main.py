@@ -36,10 +36,58 @@ _VALKEY_EXPECTED_HASH = hashlib.sha256(
 
 _SHARED_TTL_SECONDS = 120
 
+_EZ_SCRIPT_HELPERS = """
+import json, os, signal, subprocess, time, urllib.error, urllib.request
+
+def req(method, url, body=None, headers=None, timeout=10):
+    data = json.dumps(body).encode() if body is not None else None
+    h = {"Content-Type": "application/json", **(headers or {})}
+    r = urllib.request.Request(url, data=data, headers=h, method=method)
+    try:
+        with urllib.request.urlopen(r, timeout=timeout) as resp:
+            raw = resp.read().decode()
+            return resp.status, dict(resp.headers), raw
+    except urllib.error.HTTPError as err:
+        return err.code, dict(err.headers), err.read().decode()
+    except (urllib.error.URLError, ConnectionError, OSError) as err:
+        return None, {}, str(err)
+
+def body(raw):
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return {}
+
+def wait_until(fn, timeout, what):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        value = fn()
+        if value:
+            return value
+        time.sleep(0.25)
+    raise AssertionError("timed out waiting for " + what)
+
+def start_node(name, port, extra_env=None):
+    env = dict(os.environ, PORT=str(port), RELEASE_NODE=name + "@127.0.0.1",
+               RELEASE_TMP="/tmp/rel-" + name, MNESIA_DIR="/tmp/mnesia-" + name)
+    env.update(extra_env or {})
+    proc = subprocess.Popen(["/app/bin/ezthrottle_local", "start"], env=env)
+    base = "http://127.0.0.1:%d" % port
+    wait_until(lambda: req("GET", base + "/ready")[0] == 200, 90, name + " ready")
+    return proc, base
+
+def job(user, key, extra=None):
+    payload = {"user_id": user, "idempotent_key": key, "url": "http://recorder:5000/upstream/target",
+               "method": "POST", "webhook_url": "http://recorder:5000/webhook"}
+    payload.update(extra or {})
+    return payload
+"""
+
 _SUITE_FILES = [
     "shared/test_health.hurl",
     "shared/test_job_lifecycle.hurl",
     "shared/test_idempotency.hurl",
+    "shared/test_retry_policy.hurl",
     "shared/test_proxy_direct.hurl",
     "shared/test_proxy_fallback.hurl",
     "shared/test_proxy_queue_active.hurl",
@@ -1043,6 +1091,126 @@ print(json.dumps({{
         )
 
     @function
+    def build_ezthrottle_with_python(self, source: dagger.Directory) -> Container:
+        """The production ezthrottle-local image plus python3, so a test
+        script can run the real release and signal it in the same container."""
+        return self.build_ezthrottle(source).with_exec(["apk", "add", "--no-cache", "python3"])
+
+    @function
+    async def test_ezthrottle_shutdown(
+        self, source: dagger.Directory, recorder_dir: dagger.Directory
+    ) -> str:
+        """Sends SIGTERM to the real ezthrottle-local release mid-job.
+
+        Proves: /ready flips to 503 with X-Aqueduct-Node-State: draining,
+        new jobs get 503, the accepted job and its webhook still finish,
+        the drain ledger is flushed once more, and the VM exits within the
+        shutdown deadline. ezthrottle-local's counterpart to
+        test_aquifer_shutdown, minus the Valkey-backed WebSocket handoff.
+        """
+        recorder = self.build_recorder(recorder_dir).with_exposed_port(RECORDER_PORT).as_service()
+        script = _EZ_SCRIPT_HELPERS + """
+proc, base = start_node("ezthrottle", 4000, {
+    "EZTHROTTLE_SHUTDOWN_QUIESCE_MS": "2000",
+    "EZTHROTTLE_SHUTDOWN_TIMEOUT_SECONDS": "20",
+    "EZTHROTTLE_DRAIN_ENABLED": "true",
+    "EZTHROTTLE_DRAIN_WEBHOOK_URL": "http://recorder:5000/drain-webhook",
+})
+req("POST", "http://recorder:5000/reset")
+req("POST", "http://recorder:5000/upstream/configure", {"status": 200, "body": '{"ok": true}', "delay_ms": 3000})
+
+status, _, raw = req("POST", base + "/jobs", job("shutdown-user", "shutdown-%d" % time.time_ns()))
+assert status == 201, (status, raw)
+job_id = body(raw)["job_id"]
+wait_until(lambda: body(req("GET", "http://recorder:5000/upstream/hits")[2]).get("count", 0) >= 1, 10, "job in flight")
+
+signalled = time.time()
+proc.send_signal(signal.SIGTERM)
+time.sleep(0.5)
+status, headers, _ = req("GET", base + "/ready")
+lower = {k.lower(): v for k, v in headers.items()}
+assert status == 503 and lower.get("x-aqueduct-node-state") == "draining", (status, headers)
+status, _, raw = req("POST", base + "/jobs", job("shutdown-user", "late-%d" % time.time_ns()))
+assert status == 503, ("new work during drain", status, raw)
+
+proc.wait(timeout=30)
+elapsed = time.time() - signalled
+assert elapsed < 25, elapsed
+
+status, _, raw = req("GET", "http://recorder:5000/webhooks/" + job_id)
+hook = body(raw)
+assert status == 200 and hook["webhook"]["json"]["status"] == "completed", (status, raw)
+status, _, raw = req("GET", "http://recorder:5000/drain-webhooks/latest")
+assert status == 200 and job_id in raw, ("final ledger flush", status, raw)
+
+print(json.dumps({"result": "PASS", "job_id": job_id, "exit_code": proc.returncode, "drain_seconds": round(elapsed, 1)}))
+"""
+        return await (
+            self.build_ezthrottle_with_python(source)
+            .with_service_binding("recorder", recorder)
+            .with_exec(["python3", "-c", script])
+            .stdout()
+        )
+
+    @function
+    async def test_ezthrottle_cluster(
+        self, source: dagger.Directory, recorder_dir: dagger.Directory
+    ) -> str:
+        """Two real ezthrottle-local nodes joined through
+        EZTHROTTLE_CLUSTER_HOSTS, in account-queue (per-tenant) mode.
+
+        1. Shared idempotency: agent-a's shared job on node A and agent-b's
+           request for the same shared key on node B coalesce onto one job.
+        2. Per-user idempotency across nodes: the same user and key on A
+           then B is one job (Syn routes both to the queue's single owner).
+        3. Control: different users with the same per-user key stay separate.
+        """
+        recorder = self.build_recorder(recorder_dir).with_exposed_port(RECORDER_PORT).as_service()
+        script = _EZ_SCRIPT_HELPERS + """
+hosts = "ez_a@127.0.0.1,ez_b@127.0.0.1"
+shared = {"EZTHROTTLE_CLUSTER_HOSTS": hosts, "EZTHROTTLE_SHARED_IDEMPOTENCY_ENABLED": "true"}
+proc_a, a = start_node("ez_a", 4001, shared)
+proc_b, b = start_node("ez_b", 4002, shared)
+
+def connected():
+    env = dict(os.environ, RELEASE_NODE="ez_a@127.0.0.1", RELEASE_TMP="/tmp/rel-ez_a")
+    out = subprocess.run(["/app/bin/ezthrottle_local", "rpc", "IO.puts(length(Node.list()))"],
+                         env=env, capture_output=True, text=True).stdout.strip()
+    return out == "1"
+wait_until(connected, 60, "nodes to connect")
+
+req("POST", "http://recorder:5000/reset")
+req("POST", "http://recorder:5000/upstream/configure", {"status": 200, "body": '{"ok": true}', "delay_ms": 1500})
+tenant = {"X-Aqueduct-Account-Queue": "enabled"}
+run = str(time.time_ns())
+
+s1, _, r1 = req("POST", a + "/jobs", job("agent-a", "weather:" + run, {"idempotency_scope": "shared"}), tenant)
+s2, _, r2 = req("POST", b + "/jobs", job("agent-b", "weather:" + run, {"idempotency_scope": "shared"}), tenant)
+assert s1 == 201 and s2 == 200, ("shared", s1, r1, s2, r2)
+assert body(r2).get("duplicate") is True and body(r2)["job_id"] == body(r1)["job_id"], ("shared", r1, r2)
+
+s3, _, r3 = req("POST", b + "/jobs", job("agent-c", "own:" + run), tenant)
+s4, _, r4 = req("POST", a + "/jobs", job("agent-c", "own:" + run), tenant)
+assert s3 == 201 and s4 == 200 and body(r4)["job_id"] == body(r3)["job_id"], ("per-user", s3, r3, s4, r4)
+
+s5, _, r5 = req("POST", a + "/jobs", job("agent-d", "mine:" + run), tenant)
+s6, _, r6 = req("POST", b + "/jobs", job("agent-e", "mine:" + run), tenant)
+assert s5 == 201 and s6 == 201 and body(r5)["job_id"] != body(r6)["job_id"], ("separate users", r5, r6)
+
+for proc in (proc_a, proc_b):
+    proc.send_signal(signal.SIGTERM)
+for proc in (proc_a, proc_b):
+    proc.wait(timeout=40)
+print(json.dumps({"result": "PASS", "shared_job": body(r1)["job_id"], "per_user_job": body(r3)["job_id"]}))
+"""
+        return await (
+            self.build_ezthrottle_with_python(source)
+            .with_service_binding("recorder", recorder)
+            .with_exec(["python3", "-c", script])
+            .stdout()
+        )
+
+    @function
     async def test_ezthrottle_drain(
         self,
         source: dagger.Directory,
@@ -1253,6 +1421,14 @@ print(json.dumps({{
                 self.test_aquifer_admission(aquifer_source, hurl_dir, recorder_dir),
             ),
             ("ezthrottle", self.test_ezthrottle(ezthrottle_source, hurl_dir, recorder_dir)),
+            (
+                "ezthrottle-shutdown",
+                self.test_ezthrottle_shutdown(ezthrottle_source, recorder_dir),
+            ),
+            (
+                "ezthrottle-cluster",
+                self.test_ezthrottle_cluster(ezthrottle_source, recorder_dir),
+            ),
             (
                 "ezthrottle-websocket",
                 self.test_ezthrottle_websocket(ezthrottle_source, websocket_dir),
