@@ -1,6 +1,6 @@
 .PHONY: help build-recorder \
         contract-test-aquifer contract-test-aquifer-drain contract-test-aquifer-admission \
-        contract-test-aquifer-valkey-idempotency \
+        contract-test-aquifer-valkey-idempotency contract-test-aquifer-valkey-shared-idempotency \
         contract-test-aquifer-websocket contract-test-aquifer-shutdown \
         contract-test-ezthrottle contract-test-ezthrottle-drain \
         contract-test-aquifer-drain-batch contract-test-ezthrottle-drain-batch \
@@ -20,6 +20,7 @@ help:
 	@echo "  make contract-test-aquifer-drain        drain-ledger test against Aquifer"
 	@echo "  make contract-test-aquifer-drain-batch  periodic batch drain test against Aquifer"
 	@echo "  make contract-test-aquifer-valkey-idempotency Aquifer + Valkey remote idempotency"
+	@echo "  make contract-test-aquifer-valkey-shared-idempotency shared-scope keys across two Aquifers + Valkey"
 	@echo "  make contract-test-aquifer-websocket    Aquifer + Valkey WebSocket proxy contract"
 	@echo "  make contract-test-aquifer-shutdown     real SIGTERM drain and WebSocket handoff contract"
 	@echo "  make contract-test-aquifer-admission    admission-rejection test against Aquifer"
@@ -47,6 +48,9 @@ contract-test-aquifer-drain-batch:
 
 contract-test-aquifer-valkey-idempotency:
 	dagger call test-aquifer-valkey-idempotency --source=$(AQUIFER_SRC) --recorder-dir=./recorder
+
+contract-test-aquifer-valkey-shared-idempotency:
+	dagger call test-aquifer-valkey-shared-idempotency --source=$(AQUIFER_SRC) --recorder-dir=./recorder
 
 contract-test-aquifer-websocket:
 	dagger call test-aquifer-websocket --source=$(AQUIFER_SRC) --websocket-dir=./websocket
