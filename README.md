@@ -30,7 +30,10 @@ make contract-test-ezthrottle          # full shared suite against ezthrottle-lo
 make contract-test-aquifer-admission   # admission-rejection test only
 make contract-test-aquifer-drain       # drain-ledger test only (~40s, see "Drain-mode timing" below)
 make contract-test-aquifer-valkey-idempotency # Aquifer + Valkey remote idempotency
-make contract-test-aquifer-websocket   # Aquifer + Valkey WebSocket proxy contract
+make contract-test-aquifer-valkey-cluster # Aquifer + Valkey load-aware rendezvous
+make contract-test-aquifer-websocket   # shared WebSocket contract against Aquifer
+make contract-test-ezthrottle-websocket # same contract against ezthrottle-local
+make contract-test-websocket-parity    # run that one contract against both
 make contract-test-aquifer-shutdown    # real SIGTERM drain + WebSocket handoff
 make contract-test-drain-batch-parity  # same batch drain contract against both backends
 make contract-test-all                 # everything, both backends
@@ -63,11 +66,16 @@ plus backend-specific drain timing checks and a shared drain batch parity check:
   `aqueduct:idempotency:<hash>` plus `aqueduct:result:<hash>` through the Valkey sink; the other
   instance, with an empty local DB, receives the same request and returns `duplicate:true` from the
   remote Valkey lookup.
-- **`test_aquifer_websocket`** (Aquifer only, Dagger function) — starts a real Aquifer container,
-  Valkey, and an upstream WebSocket fixture. It verifies durable command/event ordering,
-  one-to-many event correlation, cursor replay, slow-start connection pacing, automatic reconnect,
-  live queue positions, per-instance waiting and rejection limits, gateway-header forwarding, and
-  the raw Valkey stream with expiration.
+- **`test_aquifer_valkey_cluster`** (Aquifer only, Dagger function) — runs concurrent ownership
+  claims against real Valkey, then verifies sticky ownership, active-user capacity spillover,
+  draining-node replacement, and availability-first overflow behavior.
+- **WebSocket parity contract** (`test_aquifer_websocket`, `test_ezthrottle_websocket`, and
+  `test_websocket_parity`) — uses one neutral Go fixture and runs its exact same public
+  protocol assertions against either target URL. It verifies slow-start connection pacing,
+  durable command/event ordering, cursor replay, automatic upstream reconnect, live queue
+  positions, per-node connection limits, and transcript expiration. It never inspects Valkey or
+  Mnesia, so both implementations must prove the same externally observable behavior rather than
+  passing backend-specific tests.
 - **`test_aquifer_shutdown`** (Aquifer only, Dagger function) — sends a real `SIGTERM` to the
   production Aquifer binary with an accepted job and WebSocket still active. It verifies draining
   readiness and HTTP/WebSocket admission, completion webhook delivery, `server_draining` plus close code 1012,

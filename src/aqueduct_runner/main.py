@@ -285,6 +285,22 @@ class AqueductRunner:
         )
 
     @function
+    def build_ezthrottle_websocket(self, source: dagger.Directory) -> Container:
+        """ezthrottle-local with the same WebSocket contract limits used for Aquifer."""
+        return (
+            self.build_ezthrottle(source)
+            .with_env_variable("EZTHROTTLE_ALLOWED_URL_DOMAINS", "backend")
+            .with_env_variable("EZTHROTTLE_WS_MAX_CLIENT_CONNECTIONS", "3")
+            .with_env_variable("EZTHROTTLE_WS_MAX_UPSTREAM_CONNECTIONS", "4")
+            .with_env_variable("EZTHROTTLE_WS_MAX_WAITING_CONNECTIONS", "4")
+            .with_env_variable("EZTHROTTLE_WS_CONNECT_RPS", "50")
+            .with_env_variable("EZTHROTTLE_WS_SLOW_START_RPS", "1")
+            .with_env_variable("EZTHROTTLE_WS_STREAM_TTL_SECONDS", "3")
+            .with_env_variable("EZTHROTTLE_WS_HANDSHAKE_TIMEOUT_SECONDS", "3")
+            .with_env_variable("EZTHROTTLE_WS_RECONNECT_MAX_SECONDS", "2")
+        )
+
+    @function
     def build_canalis(self, source: dagger.Directory) -> Container:
         """canalis-rs's own Dockerfile, unmodified. CANALIS_VALKEY_URL is
         the one piece of config that has to change per-environment (it
@@ -370,12 +386,12 @@ class AqueductRunner:
         source: dagger.Directory,
         websocket_dir: dagger.Directory,
     ) -> str:
-        """Runs Aquifer, Valkey, and a real upstream WebSocket server.
+        """Runs the shared WebSocket contract against Aquifer.
 
         The client checks durable ordering and one-to-many causation, cursor
         replay, automatic upstream reconnect, backend capacity feedback,
         local waiting/rejection behavior, forwarded gateway identity, and
-        the underlying Valkey transcript.
+        transcript expiration.
         """
         valkey = self.build_valkey().with_exposed_port(6379).as_service()
         fixture = self.build_websocket_fixture(websocket_dir)
@@ -387,24 +403,66 @@ class AqueductRunner:
             .with_exposed_port(8080)
             .as_service()
         )
+        return await self._run_websocket_contract(fixture, backend, aquifer, 8080)
+
+    @function
+    async def test_ezthrottle_websocket(
+        self,
+        source: dagger.Directory,
+        websocket_dir: dagger.Directory,
+    ) -> str:
+        """Runs the exact same WebSocket contract against ezthrottle-local."""
+        fixture = self.build_websocket_fixture(websocket_dir)
+        backend = fixture.with_exposed_port(6060).as_service()
+        target = (
+            self.build_ezthrottle_websocket(source)
+            .with_service_binding("backend", backend)
+            .with_exposed_port(4000)
+            .as_service()
+        )
+        return await self._run_websocket_contract(fixture, backend, target, 4000)
+
+    async def _run_websocket_contract(
+        self,
+        fixture: Container,
+        backend: Service,
+        target: Service,
+        target_port: int,
+    ) -> str:
         return await (
             fixture
-            .with_service_binding("valkey", valkey)
             .with_service_binding("backend", backend)
-            .with_service_binding("aquifer", aquifer)
+            .with_service_binding("target", target)
             .with_exec(
                 [
                     "/websocket-fixture",
                     "test",
-                    "--aquifer",
-                    "ws://aquifer:8080/websocket",
+                    "--target",
+                    f"ws://target:{target_port}/websocket",
                     "--backend",
                     "ws://backend:6060/socket",
-                    "--valkey",
-                    "valkey:6379",
                 ]
             )
             .stdout()
+        )
+
+    @function
+    async def test_websocket_parity(
+        self,
+        aquifer_source: dagger.Directory,
+        ezthrottle_source: dagger.Directory,
+        websocket_dir: dagger.Directory,
+    ) -> str:
+        """Runs one neutral WebSocket contract against both implementations."""
+        aquifer_result = await self.test_aquifer_websocket(
+            aquifer_source, websocket_dir
+        )
+        ezthrottle_result = await self.test_ezthrottle_websocket(
+            ezthrottle_source, websocket_dir
+        )
+        return (
+            f"aquifer:\n{aquifer_result.strip()}\n\n"
+            f"ezthrottle-local:\n{ezthrottle_result.strip()}"
         )
 
     @function
@@ -755,6 +813,37 @@ print(json.dumps({{
             .with_service_binding("aquifer-a", aquifer_a)
             .with_service_binding("aquifer-b", aquifer_b)
             .with_exec(["python", "-c", script])
+            .stdout()
+        )
+
+    @function
+    async def test_aquifer_valkey_cluster(self, source: dagger.Directory) -> str:
+        """Runs Aquifer's coordinated rendezvous contract against real Valkey.
+
+        The Go integration test races concurrent claims for one user, checks
+        sticky ownership across a stale membership view, spills new users away
+        from a node at capacity, removes a draining owner, and confirms the
+        availability-first fallback once every active node is full.
+        """
+        valkey = self.build_valkey().with_exposed_port(6379).as_service()
+        return await (
+            dag.container()
+            .from_("golang:1.25-alpine")
+            .with_directory("/src", source)
+            .with_workdir("/src")
+            .with_service_binding("valkey", valkey)
+            .with_env_variable("AQUIFER_TEST_VALKEY_URL", "redis://valkey:6379")
+            .with_exec(
+                [
+                    "go",
+                    "test",
+                    ".",
+                    "-count=1",
+                    "-run",
+                    "^TestValkeyClusterConcurrentClaimsCapacityAndDraining$",
+                    "-v",
+                ]
+            )
             .stdout()
         )
 
@@ -1140,6 +1229,10 @@ print(json.dumps({{
                 self.test_aquifer_valkey_idempotency(aquifer_source, recorder_dir),
             ),
             (
+                "aquifer-valkey-cluster",
+                self.test_aquifer_valkey_cluster(aquifer_source),
+            ),
+            (
                 "aquifer-valkey-shared-idempotency",
                 self.test_aquifer_valkey_shared_idempotency(aquifer_source, recorder_dir),
             ),
@@ -1160,6 +1253,10 @@ print(json.dumps({{
                 self.test_aquifer_admission(aquifer_source, hurl_dir, recorder_dir),
             ),
             ("ezthrottle", self.test_ezthrottle(ezthrottle_source, hurl_dir, recorder_dir)),
+            (
+                "ezthrottle-websocket",
+                self.test_ezthrottle_websocket(ezthrottle_source, websocket_dir),
+            ),
             (
                 "ezthrottle-drain",
                 self.test_ezthrottle_drain(ezthrottle_source, hurl_dir, recorder_dir),
