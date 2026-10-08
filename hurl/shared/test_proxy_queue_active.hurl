@@ -14,10 +14,9 @@
 POST {{recorder_url}}/reset
 HTTP 200
 
-# Wait for earlier tests' work (e.g. test_proxy_fallback's failure webhook,
-# still being stored and delivered when that file's stream ends) to drain,
-# so this test's first /proxy call meets an idle domain and is attempted
-# directly instead of joining the queue behind it.
+# Wait for earlier tests' work (e.g. test_proxy_fallback's retries and its
+# failure webhook, paced down after repeated 503s) to drain, so this test's
+# first /proxy call meets an idle domain and is attempted directly.
 GET {{target_url}}/health
 [Options]
 retry: 60
