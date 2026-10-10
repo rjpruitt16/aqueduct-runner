@@ -149,6 +149,7 @@ class Ledger:
         self.lock = threading.Lock()
         self.jobs = {}  # seq -> dict
         self.executions = {}  # seq -> count
+        self.exec_times = {}  # seq -> [t, ...] relative to load start
         self.hooks = {}  # seq -> [status, ...]
         self.events = []  # (t, kind, detail)
         self.t0 = time.time()
@@ -161,10 +162,16 @@ class Ledger:
     def executed(self, seq):
         with self.lock:
             self.executions[seq] = self.executions.get(seq, 0) + 1
+            self.exec_times.setdefault(seq, []).append(round(time.time() - self.t0, 2))
 
     def hook(self, seq, status):
         with self.lock:
             self.hooks.setdefault(seq, []).append(status)
+
+
+class FixtureServer(ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = 1024  # the default (5) drops connections under bursts
 
 
 class Fixture(BaseHTTPRequestHandler):
@@ -495,7 +502,7 @@ class Load:
                 rec["accepted_at"] = time.time()
                 rec["outcome"] = "accepted"
                 return
-            if status not in (None, 502, 503):
+            if status not in (None, 502, 503, 504):
                 rec["outcome"] = f"rejected_{status}"
                 return
             time.sleep(0.5)
@@ -625,6 +632,7 @@ class GrayPause(Scenario):
             proc.send_signal(signal.SIGSTOP)
             time.sleep(2)
             proc.send_signal(signal.SIGCONT)
+            self.ledger.event("resumed b")
             time.sleep(2)
         self.ledger.event("resumed")
 
@@ -746,7 +754,7 @@ def run_scenario(cls, backend, index):
     os.makedirs(DATA)
     ledger = Ledger()
     Fixture.ledger = ledger
-    fixture = ThreadingHTTPServer(("127.0.0.1", FIXTURE_PORT), Fixture)
+    fixture = FixtureServer(("127.0.0.1", FIXTURE_PORT), Fixture)
     fixture.daemon_threads = True
     threading.Thread(target=fixture.serve_forever, daemon=True).start()
 
@@ -883,7 +891,30 @@ def analyze(scenario, cluster, ledger):
     out["pass"] = all(checks.values())
     if not out["pass"] or os.environ.get("CHAOS_LOGS"):
         out["log_excerpts"] = log_excerpts(cluster)
+    if extra_exec:
+        out["duplicate_exec_detail"] = [
+            {"seq": s, "accepted_t": round((ledger.jobs[s]["accepted_at"] or 0) - ledger.t0, 2) if s in ledger.jobs else None,
+             "entry": ledger.jobs.get(s, {}).get("owners"), "executed_at": ledger.exec_times.get(s),
+             "hooks": ledger.hooks.get(s)}
+            for s in sorted(extra_exec)[:12]]
+        ids = {jid: s for s in list(extra_exec)[:4] for jid in ledger.jobs.get(s, {}).get("job_ids", []) if jid}
+        out["duplicate_job_logs"] = job_log_lines(cluster, ids)
     return out
+
+
+def job_log_lines(cluster, ids):
+    """Every log line, on every node, that mentions one of these job IDs."""
+    out = []
+    for name, node in cluster.nodes.items():
+        try:
+            lines = open(f"{node.dir}.log", errors="replace").read().splitlines()
+        except OSError:
+            continue
+        for l in lines:
+            for jid, seq in ids.items():
+                if jid in l:
+                    out.append(f"{name} seq={seq} {l[:240]}")
+    return out[:40]
 
 
 def log_excerpts(cluster, keep=25):
@@ -897,7 +928,9 @@ def log_excerpts(cluster, keep=25):
         except OSError:
             continue
         hits = [l[:300] for l in lines if any(w in l.lower() for w in words)]
-        out[name] = hits[-keep:]
+        # The first errors usually explain the rest; keep them and the tail.
+        first = [l[:400] for l in lines if "[error]" in l or "[critical]" in l or "**" in l][:20]
+        out[name] = {"first_errors": first, "tail": hits[-keep:]}
     return out
 
 
