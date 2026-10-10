@@ -10,6 +10,7 @@ source of two separate implementations.
 """
 
 import hashlib
+import time
 
 import dagger
 from dagger import dag, function, object_type, Container, Service
@@ -731,6 +732,7 @@ class AqueductRunner:
 
         script = f"""
 import hashlib
+import time
 import json
 import socket
 import time
@@ -936,6 +938,7 @@ print(json.dumps({{
 
         script = f"""
 import hashlib
+import time
 import json
 import socket
 import threading
@@ -1370,6 +1373,70 @@ print(json.dumps({"result": "PASS", "shared_job": body(r1)["job_id"], "per_user_
         )
         return await self.run_hurl_files(
             ez, 4000, recorder, hurl_dir, _ADMISSION_SUITE_FILES
+        )
+
+    @function
+    def build_aquifer_chaos(self, source: dagger.Directory, chaos_dir: dagger.Directory) -> Container:
+        """Aquifer binary + Python + Valkey in one container, so the
+        multi-node harness can start, kill -9 and restart nodes as plain
+        processes and put its fault proxies between them."""
+        binary = (
+            dag.container()
+            .from_("golang:1.25-alpine")
+            .with_directory("/src", source)
+            .with_workdir("/src")
+            .with_exec(["go", "build", "-o", "/out/aquifer", "./cmd/aquifer"])
+            .file("/out/aquifer")
+        )
+        return (
+            dag.container()
+            .from_("python:3.12-alpine")
+            .with_exec(["apk", "add", "--no-cache", "valkey"])
+            .with_file("/app/aquifer", binary)
+            .with_directory("/chaos", chaos_dir)
+        )
+
+    @function
+    async def test_multinode_failures(
+        self,
+        aquifer_source: dagger.Directory,
+        chaos_dir: dagger.Directory,
+        scenarios: str = "all",
+    ) -> str:
+        """Multi-node failure scenarios (aquifer#28): node kill and restart,
+        permanent node loss, rolling deploy, gray failure, partitions,
+        Valkey outage, scale up and down. Each runs a fresh 3-node cluster
+        under load and reports lost, unfinished and duplicate jobs. Returns
+        one JSON line per scenario plus a summary, pass or fail."""
+        return await (
+            self.build_aquifer_chaos(aquifer_source, chaos_dir)
+            .with_env_variable("CHAOS_RUN", str(time.time_ns()))  # never reuse a cached run
+            .with_exec(
+                ["python3", "/chaos/multinode.py", "--backend", "aquifer", "--scenarios", scenarios],
+                expect=dagger.ReturnType.ANY,
+            )
+            .stdout()
+        )
+
+    @function
+    async def test_ezthrottle_multinode_failures(
+        self,
+        ezthrottle_source: dagger.Directory,
+        chaos_dir: dagger.Directory,
+        scenarios: str = "all",
+    ) -> str:
+        """The same multi-node failure scenarios (ezthrottle-local#21) against
+        real ezthrottle-local releases joined over Erlang distribution.
+        Scenarios that need HTTP peer links or Valkey are Aquifer-only."""
+        return await (
+            self.build_ezthrottle_with_python(ezthrottle_source)
+            .with_directory("/chaos", chaos_dir)
+            .with_env_variable("CHAOS_RUN", str(time.time_ns()))
+            .with_exec(
+                ["python3", "/chaos/multinode.py", "--backend", "ezthrottle", "--scenarios", scenarios],
+                expect=dagger.ReturnType.ANY,
+            )
+            .stdout()
         )
 
     @function
