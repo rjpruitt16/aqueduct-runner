@@ -307,6 +307,12 @@ class EzthrottleBackend:
         return subprocess.run(["/app/bin/ezthrottle_local", "rpc", code], env=env,
                               capture_output=True, text=True, timeout=30).stdout.strip()
 
+    def pending_sample(self, cluster, name):
+        code = ('jobs = EzthrottleLocal.IdempotentStore.recoverable_jobs(); '
+                'IO.puts(inspect({length(jobs), jobs |> Enum.take(6) |> Enum.map(fn j -> '
+                '{j.user_id, j.url |> String.split("/") |> List.last(), j.status, j.attempts} end)}))')
+        return self.rpc(cluster, name, code)
+
     def partition(self, cluster, node, mode):
         peers = [n for n in cluster.names if n != node and cluster.alive(n)]
         if mode == "pass":
@@ -567,11 +573,24 @@ class RollingDeploy(Scenario):
         self.at(8)
         for name in self.cluster.names:
             t = time.time()
+            if hasattr(self.cluster.backend, "pending_sample"):
+                threading.Thread(target=self.sample_pending, args=(name,), daemon=True).start()
             self.cluster.terminate(name)
             self.ledger.event("drained+exited", node=name, seconds=round(time.time() - t, 1))
             self.cluster.start(name)
             self.ledger.event("restarted", node=name)
             time.sleep(3)
+
+
+    def sample_pending(self, name):
+        """While `name` drains, record what work it is still waiting on."""
+        time.sleep(1.5)
+        for _ in range(3):
+            if not self.cluster.alive(name):
+                return
+            self.ledger.event("pending while draining", node=name,
+                              sample=self.cluster.backend.pending_sample(self.cluster, name))
+            time.sleep(5)
 
 
 class GraySlow(Scenario):
@@ -783,21 +802,27 @@ def analyze(scenario, cluster, ledger):
            "rejected": sum(1 for r in jobs if (r["outcome"] or "").startswith("rejected")),
            "retried_submissions": sum(len(r["attempts"]) > 1 for r in jobs)}
 
+    # Aquifer names each job's owner node in a response header; ezthrottle-local
+    # doesn't, so there the owner of a missing job is unknown and any node
+    # killed around its acceptance could have held it.
+    owner_known = bool(cluster.backend.owner_header) and cluster.backend.name == "aquifer"
     lost, lost_flush, lost_destroyed, unfinished, no_hook = [], [], [], [], []
+    unfinished_detail = []
     for r in accepted:
         seq = r["seq"]
         if seq in ledger.hooks:
             continue
         found = [lookup(cluster, jid) for jid in r["job_ids"] if jid]
         statuses = [st for node, st in found if node]
+        could_own = (lambda node: node in r["owners"]) if owner_known else (lambda node: True)
         if any(st in ("queued", "dispatching", "in_flight", "retrying", "waiting") for st in statuses):
             unfinished.append(seq)
+            unfinished_detail.append({"seq": seq, "user": r["user"], "found": found, "entry": r["owners"]})
         elif statuses:
             no_hook.append(seq)
-        elif any(o in scenario.destroyed for o in r["owners"]):
+        elif any(could_own(n) and r["accepted_at"] <= t + 0.05 for t, n in scenario.kills if n in scenario.destroyed):
             lost_destroyed.append(seq)
-        elif any(abs(r["accepted_at"] - t) < 0.3 or (r["accepted_at"] < t and t - r["accepted_at"] < 0.3)
-                 for t, node in scenario.kills if node in r["owners"]):
+        elif any(could_own(n) and 0 <= t - r["accepted_at"] < 0.3 for t, n in scenario.kills):
             lost_flush.append(seq)
         else:
             lost.append(seq)
@@ -831,6 +856,13 @@ def analyze(scenario, cluster, ledger):
                         "p99_ms": round(pct(b["ok"], .99) * 1000), "failed": b["failed"]}
                        for t, b in sorted(buckets.items())]
     out["events"] = ledger.events
+    out["unfinished_detail"] = unfinished_detail[:10]
+    codes = {}
+    for r in jobs:
+        for a in r["attempts"]:
+            if a["status"] not in (200, 201):
+                codes[str(a["status"])] = codes.get(str(a["status"]), 0) + 1
+    out["failed_attempt_codes"] = codes
     out["samples"] = {"lost": lost[:5], "unfinished": unfinished[:5], "duplicate_jobs": dup_jobs[:5],
                       "extra_exec": list(extra_exec.items())[:5]}
     if lost or dup_jobs:
@@ -849,6 +881,23 @@ def analyze(scenario, cluster, ledger):
         checks["no_duplicate_executions"] = not extra_exec
     out["checks"] = checks
     out["pass"] = all(checks.values())
+    if not out["pass"] or os.environ.get("CHAOS_LOGS"):
+        out["log_excerpts"] = log_excerpts(cluster)
+    return out
+
+
+def log_excerpts(cluster, keep=25):
+    """Lifecycle, shutdown, cluster and error lines from each node's log."""
+    words = ("drain", "shutdown", "lifecycle", "nodedown", "nodeup", "netsplit", "conflict", "error",
+             "timeout", "exit", "crash", "cluster", "warn")
+    out = {}
+    for name, node in cluster.nodes.items():
+        try:
+            lines = open(f"{node.dir}.log", errors="replace").read().splitlines()
+        except OSError:
+            continue
+        hits = [l[:300] for l in lines if any(w in l.lower() for w in words)]
+        out[name] = hits[-keep:]
     return out
 
 
