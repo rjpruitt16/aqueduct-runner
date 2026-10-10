@@ -8,7 +8,7 @@
         contract-test-ezthrottle-shutdown contract-test-ezthrottle-cluster \
         contract-test-aquifer-drain-batch contract-test-ezthrottle-drain-batch \
         contract-test-drain-batch-parity contract-test-ezthrottle-admission \
-        contract-test-all \
+        contract-test-all multinode-aquifer multinode-ezthrottle \
         recorder-up recorder-down recorder-logs clean
 
 AQUIFER_SRC    ?= ../aquifer
@@ -38,6 +38,8 @@ help:
 	@echo "  make contract-test-drain-batch-parity   same batch drain contract against both backends"
 	@echo "  make contract-test-ezthrottle-admission admission-rejection test against ezthrottle-local"
 	@echo "  make contract-test-all                  everything, both backends"
+	@echo "  make multinode-aquifer [SCENARIOS=a,b]  multi-node failure scenarios against Aquifer (~15 min)"
+	@echo "  make multinode-ezthrottle [SCENARIOS=]  the same scenarios against ezthrottle-local"
 	@echo "  make contract-test-registration          real Aquifer->Canalis->Valkey registration ping"
 	@echo ""
 	@echo "  make recorder-up / recorder-down / recorder-logs   iterate on the recorder locally, no Dagger"
@@ -121,3 +123,11 @@ contract-test-ezthrottle-shutdown:
 
 contract-test-ezthrottle-cluster:
 	dagger call test-ezthrottle-cluster --source=$(EZTHROTTLE_SRC) --recorder-dir=./recorder
+
+SCENARIOS ?= all
+
+multinode-aquifer:
+	dagger call test-multinode-failures --aquifer-source=$(AQUIFER_SRC) --chaos-dir=./chaos --scenarios=$(SCENARIOS)
+
+multinode-ezthrottle:
+	dagger call test-ezthrottle-multinode-failures --ezthrottle-source=$(EZTHROTTLE_SRC) --chaos-dir=./chaos --scenarios=$(SCENARIOS)
