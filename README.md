@@ -36,6 +36,7 @@ make contract-test-spillway-websocket # same contract against spillway
 make contract-test-websocket-parity    # run that one contract against both
 make contract-test-aquifer-shutdown    # real SIGTERM drain + WebSocket handoff
 make contract-test-drain-batch-parity  # same batch drain contract against both backends
+make contract-test-request-schemas-parity # L8 request schemas (422 on mismatch) against both backends
 make contract-test-all                 # everything, both backends
 ```
 
@@ -58,6 +59,7 @@ plus backend-specific drain timing checks and a shared drain batch parity check:
   the queue instead of attempted directly — proving the proactive signal actually trips the breaker,
   not just logs it.
 - **`test_l8_discovery.hurl`** — `/.well-known/l8` metadata, field-for-field identical on both sides.
+- **`test_l8_request_schemas.hurl`** — the recorder advertises L8 0.2 `request_schemas`; with schema validation on, bodies that break the schema get `422` with the same `schema_route`/`schema_hash`/`schema_errors` shape on `/jobs` and `/proxy`, never reach the upstream, and don't hold their idempotent key. A new `X-Aqueduct-Schema-Hash` on an upstream response triggers a refetch. Runs in its own backend container (`make contract-test-request-schemas-parity`) because both sides cache schemas per domain.
 - **`test_drain_ledger.hurl`** (Aquifer only) — a job's drain-mode ledger hash matches an
   independently precomputed SHA-256. Confirmed passing end-to-end at ~40s (see "Drain-mode timing"
   below).

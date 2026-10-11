@@ -1,0 +1,77 @@
+name: Contract tests
+
+# Runs this repo's own changes (new contracts, recorder changes) against real
+# Aquifer and Spillway containers. Each backend is checked out at the branch
+# with the same name as this PR's branch when one exists, so a paired change
+# across repos is tested together, and at main otherwise.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  contract-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [aquifer, spillway]
+    steps:
+      - name: Checkout aqueduct-runner
+        uses: actions/checkout@v4
+        with:
+          path: aqueduct-runner
+
+      - name: Pick the ${{ matrix.backend }} branch
+        id: backend
+        env:
+          BRANCH: ${{ github.head_ref }}
+          REPO: https://github.com/rjpruitt16/${{ matrix.backend }}
+        run: |
+          ref=main
+          if [ -n "$BRANCH" ] && git ls-remote --exit-code --heads "$REPO" "$BRANCH" >/dev/null; then
+            ref="$BRANCH"
+          fi
+          echo "Testing ${{ matrix.backend }}@$ref"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout ${{ matrix.backend }}
+        uses: actions/checkout@v4
+        with:
+          repository: rjpruitt16/${{ matrix.backend }}
+          ref: ${{ steps.backend.outputs.ref }}
+          path: backend
+
+      - name: Contract test -- shared suite
+        uses: dagger/dagger-for-github@v8.4.1
+        with:
+          version: "0.21.8"
+          module: ./aqueduct-runner
+          call: >-
+            test-${{ matrix.backend }}
+            --source=./backend
+            --hurl-dir=./aqueduct-runner/hurl
+            --recorder-dir=./aqueduct-runner/recorder
+
+      - name: Contract test -- admission rejection
+        uses: dagger/dagger-for-github@v8.4.1
+        with:
+          version: "0.21.8"
+          module: ./aqueduct-runner
+          call: >-
+            test-${{ matrix.backend }}-admission
+            --source=./backend
+            --hurl-dir=./aqueduct-runner/hurl
+            --recorder-dir=./aqueduct-runner/recorder
+
+      - name: Contract test -- L8 request schemas
+        uses: dagger/dagger-for-github@v8.4.1
+        with:
+          version: "0.21.8"
+          module: ./aqueduct-runner
+          call: >-
+            test-${{ matrix.backend }}-request-schemas
+            --source=./backend
+            --hurl-dir=./aqueduct-runner/hurl
+            --recorder-dir=./aqueduct-runner/recorder

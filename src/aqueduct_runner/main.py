@@ -84,6 +84,10 @@ def job(user, key, extra=None):
     return payload
 """
 
+# Needs schema validation on and a fresh backend: both cache an upstream's
+# schemas, and a missing /.well-known/l8, per domain.
+_L8_SCHEMA_SUITE_FILES = ["shared/test_l8_request_schemas.hurl"]
+
 _SUITE_FILES = [
     "shared/test_health.hurl",
     "shared/test_job_lifecycle.hurl",
@@ -292,6 +296,21 @@ class AqueductRunner:
     def build_spillway_admission(self, source: dagger.Directory) -> Container:
         return self.build_spillway(source).with_env_variable(
             "SPILLWAY_DB_MAX_BYTES", "100"
+        )
+
+    @function
+    def build_aquifer_request_schemas(self, source: dagger.Directory) -> Container:
+        """Same image, with L8 request-schema validation turned on (it
+        defaults off)."""
+        return self.build_aquifer(source).with_env_variable(
+            "AQUIFER_L8_SCHEMA_VALIDATION", "true"
+        )
+
+    @function
+    def build_spillway_request_schemas(self, source: dagger.Directory) -> Container:
+        """See build_aquifer_request_schemas."""
+        return self.build_spillway(source).with_env_variable(
+            "SPILLWAY_L8_SCHEMA_VALIDATION", "true"
         )
 
     @function
@@ -1376,6 +1395,65 @@ print(json.dumps({"result": "PASS", "shared_job": body(r1)["job_id"], "per_user_
         )
 
     @function
+    async def test_aquifer_request_schemas(
+        self,
+        source: dagger.Directory,
+        hurl_dir: dagger.Directory,
+        recorder_dir: dagger.Directory,
+    ) -> str:
+        """Named, individually-invocable: L8 request schemas against Aquifer.
+        The recorder advertises request_schemas; invalid job bodies must get
+        422 on /jobs and /proxy without reaching the upstream, and a new
+        X-Aqueduct-Schema-Hash must trigger a refetch."""
+        recorder = (
+            self.build_recorder(recorder_dir).with_exposed_port(RECORDER_PORT).as_service()
+        )
+        aquifer = (
+            self.build_aquifer_request_schemas(source)
+            .with_service_binding("recorder", recorder)
+            .with_exposed_port(8080)
+            .as_service()
+        )
+        return await self.run_hurl_files(
+            aquifer, 8080, recorder, hurl_dir, _L8_SCHEMA_SUITE_FILES
+        )
+
+    @function
+    async def test_spillway_request_schemas(
+        self,
+        source: dagger.Directory,
+        hurl_dir: dagger.Directory,
+        recorder_dir: dagger.Directory,
+    ) -> str:
+        """Named, individually-invocable: the same L8 request-schema contract
+        against spillway."""
+        recorder = (
+            self.build_recorder(recorder_dir).with_exposed_port(RECORDER_PORT).as_service()
+        )
+        ez = (
+            self.build_spillway_request_schemas(source)
+            .with_service_binding("recorder", recorder)
+            .with_exposed_port(4000)
+            .as_service()
+        )
+        return await self.run_hurl_files(
+            ez, 4000, recorder, hurl_dir, _L8_SCHEMA_SUITE_FILES
+        )
+
+    @function
+    async def test_request_schemas_parity(
+        self,
+        aquifer_source: dagger.Directory,
+        spillway_source: dagger.Directory,
+        hurl_dir: dagger.Directory,
+        recorder_dir: dagger.Directory,
+    ) -> str:
+        """One L8 request-schema contract, run against both backends."""
+        aquifer = await self.test_aquifer_request_schemas(aquifer_source, hurl_dir, recorder_dir)
+        spillway = await self.test_spillway_request_schemas(spillway_source, hurl_dir, recorder_dir)
+        return f"aquifer:\n{aquifer}\n\nspillway:\n{spillway}"
+
+    @function
     def build_aquifer_chaos(self, source: dagger.Directory, chaos_dir: dagger.Directory) -> Container:
         """Aquifer binary + Python + Valkey in one container, so the
         multi-node harness can start, kill -9 and restart nodes as plain
@@ -1487,6 +1565,10 @@ print(json.dumps({"result": "PASS", "shared_job": body(r1)["job_id"], "per_user_
                 "aquifer-admission",
                 self.test_aquifer_admission(aquifer_source, hurl_dir, recorder_dir),
             ),
+            (
+                "aquifer-request-schemas",
+                self.test_aquifer_request_schemas(aquifer_source, hurl_dir, recorder_dir),
+            ),
             ("spillway", self.test_spillway(spillway_source, hurl_dir, recorder_dir)),
             (
                 "spillway-shutdown",
@@ -1513,6 +1595,10 @@ print(json.dumps({"result": "PASS", "shared_job": body(r1)["job_id"], "per_user_
             (
                 "spillway-admission",
                 self.test_spillway_admission(spillway_source, hurl_dir, recorder_dir),
+            ),
+            (
+                "spillway-request-schemas",
+                self.test_spillway_request_schemas(spillway_source, hurl_dir, recorder_dir),
             ),
         )
         lines = []
