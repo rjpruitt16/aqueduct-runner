@@ -19,6 +19,11 @@ with no product logic of their own:
      records them the same way spillway's own
      test/integration/webhook_server.py already does, generalized to also
      capture drain payloads.
+  4. L8 request schemas -- POST /l8/configure makes GET /.well-known/l8
+     advertise request_schemas and a schema_hash, so a backend with schema
+     validation on checks job bodies against them. Unconfigured, the path
+     404s as before, and the recorder never completes an L8 handshake
+     (/l8/challenge isn't served), so webhooks to it stay unsigned.
 
 State is one dict guarded by one lock -- no external store needed at this
 scale, mirroring webhook_server.py's own pattern exactly.
@@ -41,7 +46,14 @@ state = {
     # last entry repeats. Each entry overrides status/headers of upstream_config.
     "upstream_script": [],
     "upstream_hits": [],  # monotonic seconds of each /upstream/target request
+    "l8_meta": None,  # GET /.well-known/l8 body once POST /l8/configure sets it
+    "l8_meta_fetches": 0,
 }
+
+# A syntactically valid Ed25519 public key (32 zero bytes, base64). Aquifer
+# ignores metadata without a public_key and challenge_endpoint; nothing ever
+# verifies against this key because the challenge endpoint doesn't exist.
+_PLACEHOLDER_PUBLIC_KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
 
 def _watch_stream(job_id, stream_url):
@@ -176,6 +188,41 @@ def latest_drain_webhook():
         return jsonify(state["drain_webhooks"][-1])
 
 
+@app.post("/l8/configure")
+def configure_l8():
+    body = request.get_json(force=True)
+    with lock:
+        state["l8_meta"] = {
+            "protocol_version": "0.2",
+            "service_name": "aqueduct-runner-recorder",
+            "public_key": _PLACEHOLDER_PUBLIC_KEY,
+            "challenge_endpoint": "/l8/challenge",
+            "supported_algorithms": ["ed25519"],
+            "capabilities": ["signed_payloads", "request_schemas"],
+            "schema_hash": body.get("schema_hash"),
+            "request_schemas": body.get("request_schemas", {}),
+        }
+        state["l8_meta_fetches"] = 0
+    return jsonify({"configured": True})
+
+
+@app.get("/.well-known/l8")
+def well_known_l8():
+    with lock:
+        meta = state["l8_meta"]
+        if meta is not None:
+            state["l8_meta_fetches"] += 1
+    if meta is None:
+        return jsonify({"error": "not configured"}), 404
+    return jsonify(meta)
+
+
+@app.get("/l8/meta-fetches")
+def l8_meta_fetches():
+    with lock:
+        return jsonify({"count": state["l8_meta_fetches"]})
+
+
 @app.post("/reset")
 def reset():
     with lock:
@@ -185,6 +232,8 @@ def reset():
         state["upstream_config"] = {"status": 200, "body": '{"ok": true}', "headers": {}, "delay_ms": 0}
         state["upstream_script"] = []
         state["upstream_hits"] = []
+        state["l8_meta"] = None
+        state["l8_meta_fetches"] = 0
     return jsonify({"status": "reset"})
 
 

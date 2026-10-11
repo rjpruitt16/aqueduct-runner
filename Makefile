@@ -8,6 +8,8 @@
         contract-test-spillway-shutdown contract-test-spillway-cluster \
         contract-test-aquifer-drain-batch contract-test-spillway-drain-batch \
         contract-test-drain-batch-parity contract-test-spillway-admission \
+        contract-test-aquifer-request-schemas contract-test-spillway-request-schemas \
+        contract-test-request-schemas-parity \
         contract-test-all multinode-aquifer multinode-spillway \
         recorder-up recorder-down recorder-logs clean
 
@@ -37,6 +39,9 @@ help:
 	@echo "  make contract-test-spillway-drain-batch periodic batch drain test against spillway"
 	@echo "  make contract-test-drain-batch-parity   same batch drain contract against both backends"
 	@echo "  make contract-test-spillway-admission admission-rejection test against spillway"
+	@echo "  make contract-test-aquifer-request-schemas   L8 request schemas (422 on mismatch) against Aquifer"
+	@echo "  make contract-test-spillway-request-schemas  the same L8 request-schema contract against spillway"
+	@echo "  make contract-test-request-schemas-parity    L8 request-schema contract against both backends"
 	@echo "  make contract-test-all                  everything, both backends"
 	@echo "  make multinode-aquifer [SCENARIOS=a,b]  multi-node failure scenarios against Aquifer (~15 min)"
 	@echo "  make multinode-spillway [SCENARIOS=]  the same scenarios against spillway"
@@ -94,6 +99,15 @@ contract-test-drain-batch-parity:
 
 contract-test-spillway-admission:
 	dagger call test-spillway-admission --source=$(SPILLWAY_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
+
+contract-test-aquifer-request-schemas:
+	dagger call test-aquifer-request-schemas --source=$(AQUIFER_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
+
+contract-test-spillway-request-schemas:
+	dagger call test-spillway-request-schemas --source=$(SPILLWAY_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
+
+contract-test-request-schemas-parity:
+	dagger call test-request-schemas-parity --aquifer-source=$(AQUIFER_SRC) --spillway-source=$(SPILLWAY_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
 
 contract-test-all:
 	dagger call test-all --aquifer-source=$(AQUIFER_SRC) --spillway-source=$(SPILLWAY_SRC) --hurl-dir=./hurl --recorder-dir=./recorder --websocket-dir=./websocket
