@@ -1,4 +1,4 @@
-"""Multi-node failure scenarios (aquifer#28, ezthrottle-local#21).
+"""Multi-node failure scenarios (aquifer#28, spillway#21).
 
 Runs a small cluster of real nodes inside one container, puts every link
 through a TCP fault proxy, drives open-loop load, injects one fault per
@@ -285,13 +285,13 @@ class AquiferBackend:
         return [self.binary]
 
 
-class EzthrottleBackend:
-    """ezthrottle-local nodes join over Erlang distribution
-    (EZTHROTTLE_CLUSTER_HOSTS), not HTTP, so peer traffic can't go through
+class SpillwayBackend:
+    """spillway nodes join over Erlang distribution
+    (SPILLWAY_CLUSTER_HOSTS), not HTTP, so peer traffic can't go through
     the TCP proxies. Partitions instead give a node a wrong cookie for its
     peers and disconnect it: a real netsplit as far as the BEAM is
     concerned. Healing restores the cookie and reconnects."""
-    name = "ezthrottle"
+    name = "spillway"
     owner_header = "x-ezthrottle-node"
     request_headers = {"X-Aqueduct-Account-Queue": "enabled"}
 
@@ -299,23 +299,23 @@ class EzthrottleBackend:
         hosts = ",".join(f"ez_{n}@127.0.0.1" for n in cluster.names)
         return dict(os.environ, PORT=str(node.port), RELEASE_NODE=f"ez_{node.name}@127.0.0.1",
                     RELEASE_TMP=f"{node.dir}/rel", MNESIA_DIR=f"{node.dir}/mnesia",
-                    EZTHROTTLE_CLUSTER_HOSTS=hosts, EZTHROTTLE_DEFAULT_RPS="5000",
-                    EZTHROTTLE_SHUTDOWN_QUIESCE_MS="1000", EZTHROTTLE_SHUTDOWN_TIMEOUT_SECONDS="20")
+                    SPILLWAY_CLUSTER_HOSTS=hosts, SPILLWAY_DEFAULT_RPS="5000",
+                    SPILLWAY_SHUTDOWN_QUIESCE_MS="1000", SPILLWAY_SHUTDOWN_TIMEOUT_SECONDS="20")
 
     def prepare(self):
         pass
 
     def command(self, node):
-        return ["/app/bin/ezthrottle_local", "start"]
+        return ["/app/bin/spillway", "start"]
 
     def rpc(self, cluster, name, code):
         node = cluster.nodes[name]
         env = dict(os.environ, RELEASE_NODE=f"ez_{name}@127.0.0.1", RELEASE_TMP=f"{node.dir}/rel")
-        return subprocess.run(["/app/bin/ezthrottle_local", "rpc", code], env=env,
+        return subprocess.run(["/app/bin/spillway", "rpc", code], env=env,
                               capture_output=True, text=True, timeout=30).stdout.strip()
 
     def pending_sample(self, cluster, name):
-        code = ('jobs = EzthrottleLocal.IdempotentStore.recoverable_jobs(); '
+        code = ('jobs = Spillway.IdempotentStore.recoverable_jobs(); '
                 'IO.puts(inspect({length(jobs), jobs |> Enum.take(6) |> Enum.map(fn j -> '
                 '{j.user_id, j.url |> String.split("/") |> List.last(), j.status, j.attempts} end)}))')
         return self.rpc(cluster, name, code)
@@ -337,7 +337,7 @@ class EzthrottleBackend:
             self.rpc(cluster, n, code)
 
 
-BACKENDS = {"aquifer": AquiferBackend, "ezthrottle": EzthrottleBackend}
+BACKENDS = {"aquifer": AquiferBackend, "spillway": SpillwayBackend}
 
 
 class Node:
@@ -514,7 +514,7 @@ class Load:
 
 class Scenario:
     provider = "static"
-    backends = ("aquifer", "ezthrottle")
+    backends = ("aquifer", "spillway")
     names = ("a", "b", "c")
     duration = 40
     destroyed = ()
@@ -643,7 +643,7 @@ class GrayTimeout(Scenario):
     have accepted the job. Measures duplicate jobs from that retry."""
     key = "gray_timeout"
     duration = 50
-    backends = ("aquifer",)  # ezthrottle peers talk over Erlang distribution, not HTTP
+    backends = ("aquifer",)  # spillway peers talk over Erlang distribution, not HTTP
 
     def faults(self):
         self.at(10)
@@ -706,7 +706,7 @@ class ValkeyOutage(Scenario):
 
 class ScaleUpDown(Scenario):
     """Start with a and b, add c at 10s, then drain and remove a at 25s, all
-    under load. Aquifer uses Valkey membership; ezthrottle-local lists all
+    under load. Aquifer uses Valkey membership; spillway lists all
     three hosts from the start and c simply joins when it boots."""
     key = "scale_up_down"
     provider = "valkey"
@@ -810,7 +810,7 @@ def analyze(scenario, cluster, ledger):
            "rejected": sum(1 for r in jobs if (r["outcome"] or "").startswith("rejected")),
            "retried_submissions": sum(len(r["attempts"]) > 1 for r in jobs)}
 
-    # Aquifer names each job's owner node in a response header; ezthrottle-local
+    # Aquifer names each job's owner node in a response header; spillway
     # doesn't, so there the owner of a missing job is unknown and any node
     # killed around its acceptance could have held it.
     owner_known = bool(cluster.backend.owner_header) and cluster.backend.name == "aquifer"

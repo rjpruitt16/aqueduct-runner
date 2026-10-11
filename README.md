@@ -1,7 +1,7 @@
 # Aqueduct Runner
 
 Cross-repo contract testing for [Aquifer](https://github.com/rjpruitt16/aquifer) (Go) and
-[ezthrottle-local](https://github.com/rjpruitt16/ezthrottle-local) (Elixir).
+[spillway](https://github.com/rjpruitt16/spillway) (Elixir).
 
 Both projects claim to be interchangeable at specific boundaries — the same `X-Aqueduct-*`/
 `X-EZTHROTTLE-*` header names, job JSON shapes, drain-mode ledger hash scheme, and `POST /proxy`
@@ -14,25 +14,25 @@ build), and runs one identical [Hurl](https://hurl.dev) suite against both, orch
 ## Quick start
 
 Requires [Dagger](https://docs.dagger.io/install) and Docker. Clone this repo as a sibling of
-`aquifer` and `ezthrottle-local` (or point `AQUIFER_SRC`/`EZTHROTTLE_SRC` elsewhere):
+`aquifer` and `spillway` (or point `AQUIFER_SRC`/`SPILLWAY_SRC` elsewhere):
 
 ```
 SAAS/
   aqueduct-runner/   <- this repo
   aquifer/
-  ezthrottle-local/
+  spillway/
 ```
 
 ```bash
 make help                              # list every named target
 make contract-test-aquifer             # full shared suite against Aquifer
-make contract-test-ezthrottle          # full shared suite against ezthrottle-local
+make contract-test-spillway          # full shared suite against spillway
 make contract-test-aquifer-admission   # admission-rejection test only
 make contract-test-aquifer-drain       # drain-ledger test only (~40s, see "Drain-mode timing" below)
 make contract-test-aquifer-valkey-idempotency # Aquifer + Valkey remote idempotency
 make contract-test-aquifer-valkey-cluster # Aquifer + Valkey load-aware rendezvous
 make contract-test-aquifer-websocket   # shared WebSocket contract against Aquifer
-make contract-test-ezthrottle-websocket # same contract against ezthrottle-local
+make contract-test-spillway-websocket # same contract against spillway
 make contract-test-websocket-parity    # run that one contract against both
 make contract-test-aquifer-shutdown    # real SIGTERM drain + WebSocket handoff
 make contract-test-drain-batch-parity  # same batch drain contract against both backends
@@ -69,7 +69,7 @@ plus backend-specific drain timing checks and a shared drain batch parity check:
 - **`test_aquifer_valkey_cluster`** (Aquifer only, Dagger function) — runs concurrent ownership
   claims against real Valkey, then verifies sticky ownership, active-user capacity spillover,
   draining-node replacement, and availability-first overflow behavior.
-- **WebSocket parity contract** (`test_aquifer_websocket`, `test_ezthrottle_websocket`, and
+- **WebSocket parity contract** (`test_aquifer_websocket`, `test_spillway_websocket`, and
   `test_websocket_parity`) — uses one neutral Go fixture and runs its exact same public
   protocol assertions against either target URL. It verifies slow-start connection pacing,
   durable command/event ordering, cursor replay, automatic upstream reconnect, live queue
@@ -81,10 +81,10 @@ plus backend-specific drain timing checks and a shared drain batch parity check:
   readiness and HTTP/WebSocket admission, completion webhook delivery, `server_draining` plus close code 1012,
   `active -> draining -> offline` registration, final ledger flush, transcript retention, and
   bounded process exit.
-- **`test_drain_ledger_ezthrottle.hurl`** (ezthrottle-local only) — the identical check. Confirmed
+- **`test_drain_ledger_spillway.hurl`** (spillway only) — the identical check. Confirmed
   passing end-to-end at ~40s, now matching Aquifer's (see "Drain-mode timing" below for the fix that
   closed the gap); separate files because the two backends' idle-timeout env vars differ.
-- **`test_drain_batch.hurl`** (Aquifer and ezthrottle-local) — enables periodic batch streaming and
+- **`test_drain_batch.hurl`** (Aquifer and spillway) — enables periodic batch streaming and
   verifies the same real `ledger_batch` drain webhook shape with sequence metadata before final idle
   handoff.
 
@@ -99,17 +99,17 @@ suite needs that neither backend's own test suite already provides standalone.
 
 ## Drain-mode timing
 
-Drain mode's own short timer (`AQUIFER_DRAIN_TIMER_SECONDS`/`EZTHROTTLE_DRAIN_TIMER_SECONDS`) only
+Drain mode's own short timer (`AQUIFER_DRAIN_TIMER_SECONDS`/`SPILLWAY_DRAIN_TIMER_SECONDS`) only
 starts counting once every per-domain worker has already self-torn-down from idleness. Both backends
 expose that idle-teardown timer as its own env var (`AQUIFER_IDLE_TIMEOUT_SECONDS` /
-`EZTHROTTLE_IDLE_TIMEOUT_MS`, defaulting to 5 minutes in production) — `build_aquifer_drain`/
-`build_ezthrottle_drain` set it to 30s here, which is why `test_drain_ledger*.hurl` run in ~40s each
+`SPILLWAY_IDLE_TIMEOUT_MS`, defaulting to 5 minutes in production) — `build_aquifer_drain`/
+`build_spillway_drain` set it to 30s here, which is why `test_drain_ledger*.hurl` run in ~40s each
 rather than several real minutes.
 
 Both backends tear down their idle actors event-driven — `UrlActor`/`URLWorker` notices its last
 child (`AccountQueue`) has died and removes itself from the registry immediately, rather than waiting
 out a second idle timeout of its own to reconfirm the same fact. That's why the two backends' timing
-matches despite ezthrottle-local's actor hierarchy having one more level than Aquifer's.
+matches despite spillway's actor hierarchy having one more level than Aquifer's.
 
 `test-all` includes both final idle drain checks and the shared batch-drain parity check; run the
 individual named targets for faster feedback on everything else.
@@ -128,7 +128,7 @@ aqueduct-runner/
 
 ## What's reused vs. new
 
-Reused as-is: `aquifer/Dockerfile.bench` and `ezthrottle-local/Dockerfile`, both unmodified — this
+Reused as-is: `aquifer/Dockerfile.bench` and `spillway/Dockerfile`, both unmodified — this
 repo builds real production-shaped containers, it doesn't maintain parallel build definitions.
 Everything else (the Hurl suite, the recorder, the Dagger module, this Makefile) is new — no
 equivalent cross-backend contract layer existed before this.

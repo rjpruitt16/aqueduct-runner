@@ -1,4 +1,4 @@
-# EZTHROTTLE-LOCAL. Runs against the *_drain container variant (drain mode
+# Spillway. Runs against the *_drain container variant (drain mode
 # enabled, a 2s timer instead of the 45s default). Submits a job under a
 # fixed user_id/idempotent_key (so the expected hash can be precomputed --
 # Hurl has no built-in SHA-256), lets the node go idle past the timer, and
@@ -9,8 +9,8 @@
 # drain mode's own short timer only starts counting once AccountQueue has
 # already self-torn-down from idleness, and UrlActor tears itself down
 # (event-driven, the moment it notices its last child is gone) right
-# after. EZTHROTTLE_IDLE_TIMEOUT_MS controls that idle wait (defaults to
-# 300_000ms/5min in production; build_ezthrottle_drain sets it to
+# after. SPILLWAY_IDLE_TIMEOUT_MS controls that idle wait (defaults to
+# 300_000ms/5min in production; build_spillway_drain sets it to
 # 30_000ms here), which is why this test runs in ~40s, matching Aquifer's
 # equivalent.
 
