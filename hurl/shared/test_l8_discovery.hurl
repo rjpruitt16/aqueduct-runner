@@ -1,5 +1,5 @@
 # Verified field-for-field identical against aquifer/l8.go L8Meta and
-# ezthrottle-local/lib/ezthrottle_local/l8.ex meta/1 before writing this.
+# spillway/lib/spillway/l8.ex meta/1 before writing this.
 GET {{target_url}}/.well-known/l8
 HTTP 200
 [Asserts]

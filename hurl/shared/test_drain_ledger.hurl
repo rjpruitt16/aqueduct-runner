@@ -1,5 +1,5 @@
-# AQUIFER ONLY -- see test_drain_ledger_ezthrottle.hurl for why
-# ezthrottle-local needs its own separate file, not just a longer budget.
+# AQUIFER ONLY -- see test_drain_ledger_spillway.hurl for why
+# spillway needs its own separate file, not just a longer budget.
 #
 # Runs only against the aquifer *_drain container variant (drain mode
 # enabled, a 2s timer instead of the 45s default). Submits a job under a

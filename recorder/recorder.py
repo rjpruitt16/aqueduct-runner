@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Recorder: the one fixture service the shared Hurl suite needs that neither
-Aquifer nor ezthrottle-local's own test suites already provide standalone.
+Aquifer nor spillway's own test suites already provide standalone.
 
 Three jobs, folded into one process since all three are pure test tooling
 with no product logic of their own:
@@ -16,7 +16,7 @@ with no product logic of their own:
      demand instead of depending on a real, uncontrolled backend.
   3. Webhook + drain-webhook capture -- both backends deliver job
      completions and drain-mode ledger flushes as webhook POSTs; this
-     records them the same way ezthrottle-local's own
+     records them the same way spillway's own
      test/integration/webhook_server.py already does, generalized to also
      capture drain payloads.
 

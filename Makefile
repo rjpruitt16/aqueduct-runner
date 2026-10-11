@@ -2,17 +2,17 @@
         contract-test-aquifer contract-test-aquifer-drain contract-test-aquifer-admission \
         contract-test-aquifer-valkey-idempotency contract-test-aquifer-valkey-shared-idempotency \
         contract-test-aquifer-valkey-cluster \
-        contract-test-aquifer-websocket contract-test-ezthrottle-websocket \
+        contract-test-aquifer-websocket contract-test-spillway-websocket \
         contract-test-websocket-parity contract-test-aquifer-shutdown \
-        contract-test-ezthrottle contract-test-ezthrottle-drain \
-        contract-test-ezthrottle-shutdown contract-test-ezthrottle-cluster \
-        contract-test-aquifer-drain-batch contract-test-ezthrottle-drain-batch \
-        contract-test-drain-batch-parity contract-test-ezthrottle-admission \
-        contract-test-all multinode-aquifer multinode-ezthrottle \
+        contract-test-spillway contract-test-spillway-drain \
+        contract-test-spillway-shutdown contract-test-spillway-cluster \
+        contract-test-aquifer-drain-batch contract-test-spillway-drain-batch \
+        contract-test-drain-batch-parity contract-test-spillway-admission \
+        contract-test-all multinode-aquifer multinode-spillway \
         recorder-up recorder-down recorder-logs clean
 
 AQUIFER_SRC    ?= ../aquifer
-EZTHROTTLE_SRC ?= ../ezthrottle-local
+SPILLWAY_SRC ?= ../spillway
 CANALIS_SRC    ?= ../canalis-rs
 
 help:
@@ -26,20 +26,20 @@ help:
 	@echo "  make contract-test-aquifer-valkey-cluster Aquifer + Valkey load-aware rendezvous"
 	@echo "  make contract-test-aquifer-valkey-shared-idempotency shared-scope keys across two Aquifers + Valkey"
 	@echo "  make contract-test-aquifer-websocket    Aquifer + Valkey WebSocket proxy contract"
-	@echo "  make contract-test-ezthrottle-websocket same WebSocket proxy contract against ezthrottle-local"
+	@echo "  make contract-test-spillway-websocket same WebSocket proxy contract against spillway"
 	@echo "  make contract-test-websocket-parity     one WebSocket contract against both implementations"
 	@echo "  make contract-test-aquifer-shutdown     real SIGTERM drain and WebSocket handoff contract"
 	@echo "  make contract-test-aquifer-admission    admission-rejection test against Aquifer"
-	@echo "  make contract-test-ezthrottle           full shared suite against ezthrottle-local"
-	@echo "  make contract-test-ezthrottle-shutdown  real SIGTERM drain against the ezthrottle-local release"
-	@echo "  make contract-test-ezthrottle-cluster   two clustered ezthrottle-local nodes: shared + per-user dedup"
-	@echo "  make contract-test-ezthrottle-drain     drain-ledger test against ezthrottle-local"
-	@echo "  make contract-test-ezthrottle-drain-batch periodic batch drain test against ezthrottle-local"
+	@echo "  make contract-test-spillway           full shared suite against spillway"
+	@echo "  make contract-test-spillway-shutdown  real SIGTERM drain against the spillway release"
+	@echo "  make contract-test-spillway-cluster   two clustered spillway nodes: shared + per-user dedup"
+	@echo "  make contract-test-spillway-drain     drain-ledger test against spillway"
+	@echo "  make contract-test-spillway-drain-batch periodic batch drain test against spillway"
 	@echo "  make contract-test-drain-batch-parity   same batch drain contract against both backends"
-	@echo "  make contract-test-ezthrottle-admission admission-rejection test against ezthrottle-local"
+	@echo "  make contract-test-spillway-admission admission-rejection test against spillway"
 	@echo "  make contract-test-all                  everything, both backends"
 	@echo "  make multinode-aquifer [SCENARIOS=a,b]  multi-node failure scenarios against Aquifer (~15 min)"
-	@echo "  make multinode-ezthrottle [SCENARIOS=]  the same scenarios against ezthrottle-local"
+	@echo "  make multinode-spillway [SCENARIOS=]  the same scenarios against spillway"
 	@echo "  make contract-test-registration          real Aquifer->Canalis->Valkey registration ping"
 	@echo ""
 	@echo "  make recorder-up / recorder-down / recorder-logs   iterate on the recorder locally, no Dagger"
@@ -68,11 +68,11 @@ contract-test-aquifer-valkey-shared-idempotency:
 contract-test-aquifer-websocket:
 	dagger call test-aquifer-websocket --source=$(AQUIFER_SRC) --websocket-dir=./websocket
 
-contract-test-ezthrottle-websocket:
-	dagger call test-ezthrottle-websocket --source=$(EZTHROTTLE_SRC) --websocket-dir=./websocket
+contract-test-spillway-websocket:
+	dagger call test-spillway-websocket --source=$(SPILLWAY_SRC) --websocket-dir=./websocket
 
 contract-test-websocket-parity:
-	dagger call test-websocket-parity --aquifer-source=$(AQUIFER_SRC) --ezthrottle-source=$(EZTHROTTLE_SRC) --websocket-dir=./websocket
+	dagger call test-websocket-parity --aquifer-source=$(AQUIFER_SRC) --spillway-source=$(SPILLWAY_SRC) --websocket-dir=./websocket
 
 contract-test-aquifer-shutdown:
 	dagger call test-aquifer-shutdown --source=$(AQUIFER_SRC) --websocket-dir=./websocket
@@ -80,23 +80,23 @@ contract-test-aquifer-shutdown:
 contract-test-aquifer-admission:
 	dagger call test-aquifer-admission --source=$(AQUIFER_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
 
-contract-test-ezthrottle:
-	dagger call test-ezthrottle --source=$(EZTHROTTLE_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
+contract-test-spillway:
+	dagger call test-spillway --source=$(SPILLWAY_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
 
-contract-test-ezthrottle-drain:
-	dagger call test-ezthrottle-drain --source=$(EZTHROTTLE_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
+contract-test-spillway-drain:
+	dagger call test-spillway-drain --source=$(SPILLWAY_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
 
-contract-test-ezthrottle-drain-batch:
-	dagger call test-ezthrottle-drain-batch --source=$(EZTHROTTLE_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
+contract-test-spillway-drain-batch:
+	dagger call test-spillway-drain-batch --source=$(SPILLWAY_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
 
 contract-test-drain-batch-parity:
-	dagger call test-drain-batch-parity --aquifer-source=$(AQUIFER_SRC) --ezthrottle-source=$(EZTHROTTLE_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
+	dagger call test-drain-batch-parity --aquifer-source=$(AQUIFER_SRC) --spillway-source=$(SPILLWAY_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
 
-contract-test-ezthrottle-admission:
-	dagger call test-ezthrottle-admission --source=$(EZTHROTTLE_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
+contract-test-spillway-admission:
+	dagger call test-spillway-admission --source=$(SPILLWAY_SRC) --hurl-dir=./hurl --recorder-dir=./recorder
 
 contract-test-all:
-	dagger call test-all --aquifer-source=$(AQUIFER_SRC) --ezthrottle-source=$(EZTHROTTLE_SRC) --hurl-dir=./hurl --recorder-dir=./recorder --websocket-dir=./websocket
+	dagger call test-all --aquifer-source=$(AQUIFER_SRC) --spillway-source=$(SPILLWAY_SRC) --hurl-dir=./hurl --recorder-dir=./recorder --websocket-dir=./websocket
 
 contract-test-registration:
 	dagger call test-registration --aquifer-source=$(AQUIFER_SRC) --canalis-source=$(CANALIS_SRC)
@@ -118,16 +118,16 @@ recorder-logs:
 clean: recorder-down
 	@rm -f /tmp/aqueduct_runner_recorder.log
 
-contract-test-ezthrottle-shutdown:
-	dagger call test-ezthrottle-shutdown --source=$(EZTHROTTLE_SRC) --recorder-dir=./recorder
+contract-test-spillway-shutdown:
+	dagger call test-spillway-shutdown --source=$(SPILLWAY_SRC) --recorder-dir=./recorder
 
-contract-test-ezthrottle-cluster:
-	dagger call test-ezthrottle-cluster --source=$(EZTHROTTLE_SRC) --recorder-dir=./recorder
+contract-test-spillway-cluster:
+	dagger call test-spillway-cluster --source=$(SPILLWAY_SRC) --recorder-dir=./recorder
 
 SCENARIOS ?= all
 
 multinode-aquifer:
 	dagger call test-multinode-failures --aquifer-source=$(AQUIFER_SRC) --chaos-dir=./chaos --scenarios=$(SCENARIOS)
 
-multinode-ezthrottle:
-	dagger call test-ezthrottle-multinode-failures --ezthrottle-source=$(EZTHROTTLE_SRC) --chaos-dir=./chaos --scenarios=$(SCENARIOS)
+multinode-spillway:
+	dagger call test-spillway-multinode-failures --spillway-source=$(SPILLWAY_SRC) --chaos-dir=./chaos --scenarios=$(SCENARIOS)

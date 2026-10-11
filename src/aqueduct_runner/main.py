@@ -1,4 +1,4 @@
-"""Aqueduct Runner: cross-repo contract testing for Aquifer and ezthrottle-local.
+"""Aqueduct Runner: cross-repo contract testing for Aquifer and spillway.
 
 Both projects claim to be interchangeable at specific boundaries (the same
 X-Aqueduct-*/X-EZTHROTTLE-* header names, job JSON shapes, drain-mode ledger
@@ -21,7 +21,7 @@ RECORDER_PORT = 5000
 # hash can be precomputed here rather than needing Hurl to hash anything
 # itself -- Hurl has no built-in SHA-256 filter. Both backends hash
 # "<user_id>:<idempotent_key>" identically (confirmed: aquifer/store.go
-# hashKey vs. ezthrottle-local idempotent_store.ex hash/1, both SHA-256
+# hashKey vs. spillway idempotent_store.ex hash/1, both SHA-256
 # lowercase-hex).
 _DRAIN_USER_ID = "drain-user"
 _DRAIN_IDEMPOTENT_KEY = "drain-key-fixed"
@@ -72,7 +72,7 @@ def start_node(name, port, extra_env=None):
     env = dict(os.environ, PORT=str(port), RELEASE_NODE=name + "@127.0.0.1",
                RELEASE_TMP="/tmp/rel-" + name, MNESIA_DIR="/tmp/mnesia-" + name)
     env.update(extra_env or {})
-    proc = subprocess.Popen(["/app/bin/ezthrottle_local", "start"], env=env)
+    proc = subprocess.Popen(["/app/bin/spillway", "start"], env=env)
     base = "http://127.0.0.1:%d" % port
     wait_until(lambda: req("GET", base + "/ready")[0] == 200, 90, name + " ready")
     return proc, base
@@ -97,14 +97,14 @@ _SUITE_FILES = [
 
 # Both backends' drain modes work end-to-end, confirmed at ~40s each with
 # the idle-timeout override both build_*_drain functions set (see
-# test_drain_ledger_ezthrottle.hurl's header). Separate files because the
+# test_drain_ledger_spillway.hurl's header). Separate files because the
 # two backends' idle-timeout env vars differ.
 _AQUIFER_DRAIN_SUITE_FILES = [
     "shared/test_drain_ledger.hurl",
 ]
 
-_EZTHROTTLE_DRAIN_SUITE_FILES = [
-    "shared/test_drain_ledger_ezthrottle.hurl",
+_SPILLWAY_DRAIN_SUITE_FILES = [
+    "shared/test_drain_ledger_spillway.hurl",
 ]
 
 _DRAIN_BATCH_SUITE_FILES = [
@@ -211,8 +211,8 @@ class AqueductRunner:
         )
 
     @function
-    def build_ezthrottle(self, source: dagger.Directory) -> Container:
-        """ezthrottle-local's own production Dockerfile, unmodified.
+    def build_spillway(self, source: dagger.Directory) -> Container:
+        """spillway's own production Dockerfile, unmodified.
 
         Deliberately NOT reproducing the Makefile's `start-server` target
         (`PORT=4000 mix run --no-halt`) -- that command never sets
@@ -235,41 +235,41 @@ class AqueductRunner:
         )
 
     @function
-    def build_ezthrottle_drain(self, source: dagger.Directory) -> Container:
+    def build_spillway_drain(self, source: dagger.Directory) -> Container:
         """See build_aquifer_drain's docstring -- same idea.
-        EZTHROTTLE_IDLE_TIMEOUT_MS controls both AccountQueue's and
+        SPILLWAY_IDLE_TIMEOUT_MS controls both AccountQueue's and
         UrlActor's idle-teardown (one shared knob, defaults to 300_000ms
-        in production); ezthrottle-local needs both shortened, since it
+        in production); spillway needs both shortened, since it
         has a genuine two-level nested idle wait Aquifer doesn't."""
         return (
-            self.build_ezthrottle(source)
-            .with_env_variable("EZTHROTTLE_DRAIN_ENABLED", "true")
-            .with_env_variable("EZTHROTTLE_DRAIN_TIMER_SECONDS", "2")
-            .with_env_variable("EZTHROTTLE_IDLE_TIMEOUT_MS", "30000")
+            self.build_spillway(source)
+            .with_env_variable("SPILLWAY_DRAIN_ENABLED", "true")
+            .with_env_variable("SPILLWAY_DRAIN_TIMER_SECONDS", "2")
+            .with_env_variable("SPILLWAY_IDLE_TIMEOUT_MS", "30000")
             .with_env_variable(
-                "EZTHROTTLE_DRAIN_WEBHOOK_URL",
+                "SPILLWAY_DRAIN_WEBHOOK_URL",
                 f"http://recorder:{RECORDER_PORT}/drain-webhook",
             )
         )
 
     @function
-    def build_ezthrottle_drain_batch(self, source: dagger.Directory) -> Container:
-        """ezthrottle-local drain mode with periodic batch streaming enabled.
+    def build_spillway_drain_batch(self, source: dagger.Directory) -> Container:
+        """spillway drain mode with periodic batch streaming enabled.
 
         The idle handoff timers stay long enough that the contract test can
         distinguish a periodic ledger_batch webhook from the final idle
         instance_idle flush.
         """
         return (
-            self.build_ezthrottle(source)
-            .with_env_variable("EZTHROTTLE_DRAIN_ENABLED", "true")
-            .with_env_variable("EZTHROTTLE_DRAIN_TIMER_SECONDS", "60")
-            .with_env_variable("EZTHROTTLE_IDLE_TIMEOUT_MS", "60000")
-            .with_env_variable("EZTHROTTLE_DRAIN_BATCH_ENABLED", "true")
-            .with_env_variable("EZTHROTTLE_DRAIN_BATCH_INTERVAL_SECONDS", "1")
-            .with_env_variable("EZTHROTTLE_DRAIN_BATCH_MAX_EVENTS", "10")
+            self.build_spillway(source)
+            .with_env_variable("SPILLWAY_DRAIN_ENABLED", "true")
+            .with_env_variable("SPILLWAY_DRAIN_TIMER_SECONDS", "60")
+            .with_env_variable("SPILLWAY_IDLE_TIMEOUT_MS", "60000")
+            .with_env_variable("SPILLWAY_DRAIN_BATCH_ENABLED", "true")
+            .with_env_variable("SPILLWAY_DRAIN_BATCH_INTERVAL_SECONDS", "1")
+            .with_env_variable("SPILLWAY_DRAIN_BATCH_MAX_EVENTS", "10")
             .with_env_variable(
-                "EZTHROTTLE_DRAIN_WEBHOOK_URL",
+                "SPILLWAY_DRAIN_WEBHOOK_URL",
                 f"http://recorder:{RECORDER_PORT}/drain-webhook",
             )
         )
@@ -289,9 +289,9 @@ class AqueductRunner:
         )
 
     @function
-    def build_ezthrottle_admission(self, source: dagger.Directory) -> Container:
-        return self.build_ezthrottle(source).with_env_variable(
-            "EZTHROTTLE_DB_MAX_BYTES", "100"
+    def build_spillway_admission(self, source: dagger.Directory) -> Container:
+        return self.build_spillway(source).with_env_variable(
+            "SPILLWAY_DB_MAX_BYTES", "100"
         )
 
     @function
@@ -334,19 +334,19 @@ class AqueductRunner:
         )
 
     @function
-    def build_ezthrottle_websocket(self, source: dagger.Directory) -> Container:
-        """ezthrottle-local with the same WebSocket contract limits used for Aquifer."""
+    def build_spillway_websocket(self, source: dagger.Directory) -> Container:
+        """spillway with the same WebSocket contract limits used for Aquifer."""
         return (
-            self.build_ezthrottle(source)
-            .with_env_variable("EZTHROTTLE_ALLOWED_URL_DOMAINS", "backend")
-            .with_env_variable("EZTHROTTLE_WS_MAX_CLIENT_CONNECTIONS", "3")
-            .with_env_variable("EZTHROTTLE_WS_MAX_UPSTREAM_CONNECTIONS", "4")
-            .with_env_variable("EZTHROTTLE_WS_MAX_WAITING_CONNECTIONS", "4")
-            .with_env_variable("EZTHROTTLE_WS_CONNECT_RPS", "50")
-            .with_env_variable("EZTHROTTLE_WS_SLOW_START_RPS", "1")
-            .with_env_variable("EZTHROTTLE_WS_STREAM_TTL_SECONDS", "3")
-            .with_env_variable("EZTHROTTLE_WS_HANDSHAKE_TIMEOUT_SECONDS", "3")
-            .with_env_variable("EZTHROTTLE_WS_RECONNECT_MAX_SECONDS", "2")
+            self.build_spillway(source)
+            .with_env_variable("SPILLWAY_ALLOWED_URL_DOMAINS", "backend")
+            .with_env_variable("SPILLWAY_WS_MAX_CLIENT_CONNECTIONS", "3")
+            .with_env_variable("SPILLWAY_WS_MAX_UPSTREAM_CONNECTIONS", "4")
+            .with_env_variable("SPILLWAY_WS_MAX_WAITING_CONNECTIONS", "4")
+            .with_env_variable("SPILLWAY_WS_CONNECT_RPS", "50")
+            .with_env_variable("SPILLWAY_WS_SLOW_START_RPS", "1")
+            .with_env_variable("SPILLWAY_WS_STREAM_TTL_SECONDS", "3")
+            .with_env_variable("SPILLWAY_WS_HANDSHAKE_TIMEOUT_SECONDS", "3")
+            .with_env_variable("SPILLWAY_WS_RECONNECT_MAX_SECONDS", "2")
         )
 
     @function
@@ -455,16 +455,16 @@ class AqueductRunner:
         return await self._run_websocket_contract(fixture, backend, aquifer, 8080)
 
     @function
-    async def test_ezthrottle_websocket(
+    async def test_spillway_websocket(
         self,
         source: dagger.Directory,
         websocket_dir: dagger.Directory,
     ) -> str:
-        """Runs the exact same WebSocket contract against ezthrottle-local."""
+        """Runs the exact same WebSocket contract against spillway."""
         fixture = self.build_websocket_fixture(websocket_dir)
         backend = fixture.with_exposed_port(6060).as_service()
         target = (
-            self.build_ezthrottle_websocket(source)
+            self.build_spillway_websocket(source)
             .with_service_binding("backend", backend)
             .with_exposed_port(4000)
             .as_service()
@@ -499,19 +499,19 @@ class AqueductRunner:
     async def test_websocket_parity(
         self,
         aquifer_source: dagger.Directory,
-        ezthrottle_source: dagger.Directory,
+        spillway_source: dagger.Directory,
         websocket_dir: dagger.Directory,
     ) -> str:
         """Runs one neutral WebSocket contract against both implementations."""
         aquifer_result = await self.test_aquifer_websocket(
             aquifer_source, websocket_dir
         )
-        ezthrottle_result = await self.test_ezthrottle_websocket(
-            ezthrottle_source, websocket_dir
+        spillway_result = await self.test_spillway_websocket(
+            spillway_source, websocket_dir
         )
         return (
             f"aquifer:\n{aquifer_result.strip()}\n\n"
-            f"ezthrottle-local:\n{ezthrottle_result.strip()}"
+            f"spillway:\n{spillway_result.strip()}"
         )
 
     @function
@@ -645,18 +645,18 @@ class AqueductRunner:
         return await self.run_hurl_files(aquifer, 8080, recorder, hurl_dir, _SUITE_FILES)
 
     @function
-    async def test_ezthrottle(
+    async def test_spillway(
         self,
         source: dagger.Directory,
         hurl_dir: dagger.Directory,
         recorder_dir: dagger.Directory,
     ) -> str:
-        """Named, individually-invocable: build + contract-test just ezthrottle-local."""
+        """Named, individually-invocable: build + contract-test just spillway."""
         recorder = (
             self.build_recorder(recorder_dir).with_exposed_port(RECORDER_PORT).as_service()
         )
         ez = (
-            self.build_ezthrottle(source)
+            self.build_spillway(source)
             .with_service_binding("recorder", recorder)
             .with_exposed_port(4000)
             .as_service()
@@ -1094,30 +1094,30 @@ print(json.dumps({{
         )
 
     @function
-    def build_ezthrottle_with_python(self, source: dagger.Directory) -> Container:
-        """The production ezthrottle-local image plus python3, so a test
+    def build_spillway_with_python(self, source: dagger.Directory) -> Container:
+        """The production spillway image plus python3, so a test
         script can run the real release and signal it in the same container."""
-        return self.build_ezthrottle(source).with_exec(["apk", "add", "--no-cache", "python3"])
+        return self.build_spillway(source).with_exec(["apk", "add", "--no-cache", "python3"])
 
     @function
-    async def test_ezthrottle_shutdown(
+    async def test_spillway_shutdown(
         self, source: dagger.Directory, recorder_dir: dagger.Directory
     ) -> str:
-        """Sends SIGTERM to the real ezthrottle-local release mid-job.
+        """Sends SIGTERM to the real spillway release mid-job.
 
         Proves: /ready flips to 503 with X-Aqueduct-Node-State: draining,
         new jobs get 503, the accepted job and its webhook still finish,
         the drain ledger is flushed once more, and the VM exits within the
-        shutdown deadline. ezthrottle-local's counterpart to
+        shutdown deadline. spillway's counterpart to
         test_aquifer_shutdown, minus the Valkey-backed WebSocket handoff.
         """
         recorder = self.build_recorder(recorder_dir).with_exposed_port(RECORDER_PORT).as_service()
         script = _EZ_SCRIPT_HELPERS + """
-proc, base = start_node("ezthrottle", 4000, {
-    "EZTHROTTLE_SHUTDOWN_QUIESCE_MS": "2000",
-    "EZTHROTTLE_SHUTDOWN_TIMEOUT_SECONDS": "20",
-    "EZTHROTTLE_DRAIN_ENABLED": "true",
-    "EZTHROTTLE_DRAIN_WEBHOOK_URL": "http://recorder:5000/drain-webhook",
+proc, base = start_node("spillway", 4000, {
+    "SPILLWAY_SHUTDOWN_QUIESCE_MS": "2000",
+    "SPILLWAY_SHUTDOWN_TIMEOUT_SECONDS": "20",
+    "SPILLWAY_DRAIN_ENABLED": "true",
+    "SPILLWAY_DRAIN_WEBHOOK_URL": "http://recorder:5000/drain-webhook",
 })
 req("POST", "http://recorder:5000/reset")
 req("POST", "http://recorder:5000/upstream/configure", {"status": 200, "body": '{"ok": true}', "delay_ms": 3000})
@@ -1149,18 +1149,18 @@ assert status == 200 and job_id in raw, ("final ledger flush", status, raw)
 print(json.dumps({"result": "PASS", "job_id": job_id, "exit_code": proc.returncode, "drain_seconds": round(elapsed, 1)}))
 """
         return await (
-            self.build_ezthrottle_with_python(source)
+            self.build_spillway_with_python(source)
             .with_service_binding("recorder", recorder)
             .with_exec(["python3", "-c", script])
             .stdout()
         )
 
     @function
-    async def test_ezthrottle_cluster(
+    async def test_spillway_cluster(
         self, source: dagger.Directory, recorder_dir: dagger.Directory
     ) -> str:
-        """Two real ezthrottle-local nodes joined through
-        EZTHROTTLE_CLUSTER_HOSTS, in account-queue (per-tenant) mode.
+        """Two real spillway nodes joined through
+        SPILLWAY_CLUSTER_HOSTS, in account-queue (per-tenant) mode.
 
         1. Shared idempotency: agent-a's shared job on node A and agent-b's
            request for the same shared key on node B coalesce onto one job.
@@ -1171,13 +1171,13 @@ print(json.dumps({"result": "PASS", "job_id": job_id, "exit_code": proc.returnco
         recorder = self.build_recorder(recorder_dir).with_exposed_port(RECORDER_PORT).as_service()
         script = _EZ_SCRIPT_HELPERS + """
 hosts = "ez_a@127.0.0.1,ez_b@127.0.0.1"
-shared = {"EZTHROTTLE_CLUSTER_HOSTS": hosts, "EZTHROTTLE_SHARED_IDEMPOTENCY_ENABLED": "true"}
+shared = {"SPILLWAY_CLUSTER_HOSTS": hosts, "SPILLWAY_SHARED_IDEMPOTENCY_ENABLED": "true"}
 proc_a, a = start_node("ez_a", 4001, shared)
 proc_b, b = start_node("ez_b", 4002, shared)
 
 def connected():
     env = dict(os.environ, RELEASE_NODE="ez_a@127.0.0.1", RELEASE_TMP="/tmp/rel-ez_a")
-    out = subprocess.run(["/app/bin/ezthrottle_local", "rpc", "IO.puts(length(Node.list()))"],
+    out = subprocess.run(["/app/bin/spillway", "rpc", "IO.puts(length(Node.list()))"],
                          env=env, capture_output=True, text=True).stdout.strip()
     return out == "1"
 wait_until(connected, 60, "nodes to connect")
@@ -1207,30 +1207,30 @@ for proc in (proc_a, proc_b):
 print(json.dumps({"result": "PASS", "shared_job": body(r1)["job_id"], "per_user_job": body(r3)["job_id"]}))
 """
         return await (
-            self.build_ezthrottle_with_python(source)
+            self.build_spillway_with_python(source)
             .with_service_binding("recorder", recorder)
             .with_exec(["python3", "-c", script])
             .stdout()
         )
 
     @function
-    async def test_ezthrottle_drain(
+    async def test_spillway_drain(
         self,
         source: dagger.Directory,
         hurl_dir: dagger.Directory,
         recorder_dir: dagger.Directory,
     ) -> str:
         """Named, individually-invocable: just the drain-ledger contract
-        test, against the short-timer ezthrottle-local variant. Confirmed
-        passing end-to-end at ~40s with the EZTHROTTLE_IDLE_TIMEOUT_MS
-        override build_ezthrottle_drain sets, matching Aquifer's timing
-        (see test_drain_ledger_ezthrottle.hurl's header for why they'd
+        test, against the short-timer spillway variant. Confirmed
+        passing end-to-end at ~40s with the SPILLWAY_IDLE_TIMEOUT_MS
+        override build_spillway_drain sets, matching Aquifer's timing
+        (see test_drain_ledger_spillway.hurl's header for why they'd
         otherwise differ)."""
         recorder = (
             self.build_recorder(recorder_dir).with_exposed_port(RECORDER_PORT).as_service()
         )
         ez = (
-            self.build_ezthrottle_drain(source)
+            self.build_spillway_drain(source)
             .with_service_binding("recorder", recorder)
             .with_exposed_port(4000)
             .as_service()
@@ -1240,25 +1240,25 @@ print(json.dumps({"result": "PASS", "shared_job": body(r1)["job_id"], "per_user_
             4000,
             recorder,
             hurl_dir,
-            _EZTHROTTLE_DRAIN_SUITE_FILES,
+            _SPILLWAY_DRAIN_SUITE_FILES,
             extra_vars=_drain_vars(),
         )
 
     @function
-    async def test_ezthrottle_drain_batch(
+    async def test_spillway_drain_batch(
         self,
         source: dagger.Directory,
         hurl_dir: dagger.Directory,
         recorder_dir: dagger.Directory,
     ) -> str:
-        """Named, individually-invocable: verifies ezthrottle-local's
+        """Named, individually-invocable: verifies spillway's
         periodic batch drain streaming path with a real container and real
         drain webhook receiver."""
         recorder = (
             self.build_recorder(recorder_dir).with_exposed_port(RECORDER_PORT).as_service()
         )
         ez = (
-            self.build_ezthrottle_drain_batch(source)
+            self.build_spillway_drain_batch(source)
             .with_service_binding("recorder", recorder)
             .with_exposed_port(4000)
             .as_service()
@@ -1281,7 +1281,7 @@ print(json.dumps({"result": "PASS", "shared_job": body(r1)["job_id"], "per_user_
     ) -> str:
         """Named, individually-invocable: verifies Aquifer's periodic batch
         drain streaming path with the same shared Hurl contract used for
-        ezthrottle-local."""
+        spillway."""
         recorder = (
             self.build_recorder(recorder_dir).with_exposed_port(RECORDER_PORT).as_service()
         )
@@ -1304,21 +1304,21 @@ print(json.dumps({"result": "PASS", "shared_job": body(r1)["job_id"], "per_user_
     async def test_drain_batch_parity(
         self,
         aquifer_source: dagger.Directory,
-        ezthrottle_source: dagger.Directory,
+        spillway_source: dagger.Directory,
         hurl_dir: dagger.Directory,
         recorder_dir: dagger.Directory,
     ) -> str:
         """Runs the same drain-batch contract against Aquifer and
-        ezthrottle-local, proving the wire payload has parity."""
+        spillway, proving the wire payload has parity."""
         checks = (
             (
                 "aquifer-drain-batch",
                 self.test_aquifer_drain_batch(aquifer_source, hurl_dir, recorder_dir),
             ),
             (
-                "ezthrottle-drain-batch",
-                self.test_ezthrottle_drain_batch(
-                    ezthrottle_source, hurl_dir, recorder_dir
+                "spillway-drain-batch",
+                self.test_spillway_drain_batch(
+                    spillway_source, hurl_dir, recorder_dir
                 ),
             ),
         )
@@ -1354,19 +1354,19 @@ print(json.dumps({"result": "PASS", "shared_job": body(r1)["job_id"], "per_user_
         )
 
     @function
-    async def test_ezthrottle_admission(
+    async def test_spillway_admission(
         self,
         source: dagger.Directory,
         hurl_dir: dagger.Directory,
         recorder_dir: dagger.Directory,
     ) -> str:
         """Named, individually-invocable: just the admission-rejection
-        contract test, against the tiny-DB-ceiling ezthrottle-local variant."""
+        contract test, against the tiny-DB-ceiling spillway variant."""
         recorder = (
             self.build_recorder(recorder_dir).with_exposed_port(RECORDER_PORT).as_service()
         )
         ez = (
-            self.build_ezthrottle_admission(source)
+            self.build_spillway_admission(source)
             .with_service_binding("recorder", recorder)
             .with_exposed_port(4000)
             .as_service()
@@ -1419,21 +1419,21 @@ print(json.dumps({"result": "PASS", "shared_job": body(r1)["job_id"], "per_user_
         )
 
     @function
-    async def test_ezthrottle_multinode_failures(
+    async def test_spillway_multinode_failures(
         self,
-        ezthrottle_source: dagger.Directory,
+        spillway_source: dagger.Directory,
         chaos_dir: dagger.Directory,
         scenarios: str = "all",
     ) -> str:
-        """The same multi-node failure scenarios (ezthrottle-local#21) against
-        real ezthrottle-local releases joined over Erlang distribution.
+        """The same multi-node failure scenarios (spillway#21) against
+        real spillway releases joined over Erlang distribution.
         Scenarios that need HTTP peer links or Valkey are Aquifer-only."""
         return await (
-            self.build_ezthrottle_with_python(ezthrottle_source)
+            self.build_spillway_with_python(spillway_source)
             .with_directory("/chaos", chaos_dir)
             .with_env_variable("CHAOS_RUN", str(time.time_ns()))
             .with_exec(
-                ["python3", "/chaos/multinode.py", "--backend", "ezthrottle", "--scenarios", scenarios],
+                ["python3", "/chaos/multinode.py", "--backend", "spillway", "--scenarios", scenarios],
                 expect=dagger.ReturnType.ANY,
             )
             .stdout()
@@ -1443,7 +1443,7 @@ print(json.dumps({"result": "PASS", "shared_job": body(r1)["job_id"], "per_user_
     async def test_all(
         self,
         aquifer_source: dagger.Directory,
-        ezthrottle_source: dagger.Directory,
+        spillway_source: dagger.Directory,
         hurl_dir: dagger.Directory,
         recorder_dir: dagger.Directory,
         websocket_dir: dagger.Directory,
@@ -1451,9 +1451,9 @@ print(json.dumps({"result": "PASS", "shared_job": body(r1)["job_id"], "per_user_
         """Runs the full suite against both backends, aggregating
         pass/fail per backend rather than stopping at the first failure.
 
-        Includes both drain checks -- aquifer-drain and ezthrottle-drain,
+        Includes both drain checks -- aquifer-drain and spillway-drain,
         each ~40s thanks to the idle-timeout overrides
-        build_aquifer_drain/build_ezthrottle_drain set. Run the individual
+        build_aquifer_drain/build_spillway_drain set. Run the individual
         named targets directly for fast feedback on everything else; this
         one is for confirming everything together."""
         checks = (
@@ -1487,32 +1487,32 @@ print(json.dumps({"result": "PASS", "shared_job": body(r1)["job_id"], "per_user_
                 "aquifer-admission",
                 self.test_aquifer_admission(aquifer_source, hurl_dir, recorder_dir),
             ),
-            ("ezthrottle", self.test_ezthrottle(ezthrottle_source, hurl_dir, recorder_dir)),
+            ("spillway", self.test_spillway(spillway_source, hurl_dir, recorder_dir)),
             (
-                "ezthrottle-shutdown",
-                self.test_ezthrottle_shutdown(ezthrottle_source, recorder_dir),
+                "spillway-shutdown",
+                self.test_spillway_shutdown(spillway_source, recorder_dir),
             ),
             (
-                "ezthrottle-cluster",
-                self.test_ezthrottle_cluster(ezthrottle_source, recorder_dir),
+                "spillway-cluster",
+                self.test_spillway_cluster(spillway_source, recorder_dir),
             ),
             (
-                "ezthrottle-websocket",
-                self.test_ezthrottle_websocket(ezthrottle_source, websocket_dir),
+                "spillway-websocket",
+                self.test_spillway_websocket(spillway_source, websocket_dir),
             ),
             (
-                "ezthrottle-drain",
-                self.test_ezthrottle_drain(ezthrottle_source, hurl_dir, recorder_dir),
+                "spillway-drain",
+                self.test_spillway_drain(spillway_source, hurl_dir, recorder_dir),
             ),
             (
-                "ezthrottle-drain-batch",
-                self.test_ezthrottle_drain_batch(
-                    ezthrottle_source, hurl_dir, recorder_dir
+                "spillway-drain-batch",
+                self.test_spillway_drain_batch(
+                    spillway_source, hurl_dir, recorder_dir
                 ),
             ),
             (
-                "ezthrottle-admission",
-                self.test_ezthrottle_admission(ezthrottle_source, hurl_dir, recorder_dir),
+                "spillway-admission",
+                self.test_spillway_admission(spillway_source, hurl_dir, recorder_dir),
             ),
         )
         lines = []
@@ -1523,3 +1523,46 @@ print(json.dumps({"result": "PASS", "shared_job": body(r1)["job_id"], "per_user_
             except dagger.ExecError as e:
                 lines.append(f"{name}: FAIL\n{e.stdout}\n{e.stderr}")
         return "\n\n".join(lines)
+
+    # ---- old names ----
+    # Spillway was EZThrottle Local. Its CI calls these four by their old
+    # names; they stay until that workflow switches to the new ones.
+
+    @function
+    async def test_ezthrottle(
+        self,
+        source: dagger.Directory,
+        hurl_dir: dagger.Directory,
+        recorder_dir: dagger.Directory,
+    ) -> str:
+        """Old name for test_spillway."""
+        return await self.test_spillway(source, hurl_dir, recorder_dir)
+
+    @function
+    async def test_ezthrottle_admission(
+        self,
+        source: dagger.Directory,
+        hurl_dir: dagger.Directory,
+        recorder_dir: dagger.Directory,
+    ) -> str:
+        """Old name for test_spillway_admission."""
+        return await self.test_spillway_admission(source, hurl_dir, recorder_dir)
+
+    @function
+    async def test_ezthrottle_websocket(
+        self,
+        source: dagger.Directory,
+        websocket_dir: dagger.Directory,
+    ) -> str:
+        """Old name for test_spillway_websocket."""
+        return await self.test_spillway_websocket(source, websocket_dir)
+
+    @function
+    async def test_ezthrottle_drain(
+        self,
+        source: dagger.Directory,
+        hurl_dir: dagger.Directory,
+        recorder_dir: dagger.Directory,
+    ) -> str:
+        """Old name for test_spillway_drain."""
+        return await self.test_spillway_drain(source, hurl_dir, recorder_dir)

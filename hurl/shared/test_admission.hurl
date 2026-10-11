@@ -1,5 +1,5 @@
 # Runs only against the dedicated *_admission container variant (see
-# build_aquifer_admission/build_ezthrottle_admission), which sets a tiny
+# build_aquifer_admission/build_spillway_admission), which sets a tiny
 # DB-size ceiling (4096 bytes) -- a couple of ordinary job submissions
 # reliably exceed it, tripping real admission rejection deterministically
 # rather than needing to actually generate enough load to fill a

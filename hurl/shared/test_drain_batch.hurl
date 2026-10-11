@@ -1,5 +1,5 @@
 # Shared drain batch contract. Runs against both Aquifer and
-# ezthrottle-local batch-drain container variants. It proves periodic
+# spillway batch-drain container variants. It proves periodic
 # ledger streaming before final idle handoff by waiting for event:
 # ledger_batch from the drain webhook recorder.
 
