@@ -10,6 +10,7 @@ source of two separate implementations.
 """
 
 import hashlib
+import json
 import time
 
 import dagger
@@ -433,22 +434,48 @@ class AqueductRunner:
         # registration loop only begins running once this container
         # references it. 6s covers the immediate first ping plus at least
         # one full 2s-interval tick, comfortably.
+        #
+        # Canalis keeps registered instances in Aquifer's own shared
+        # assignment table (aqueduct:instance:<id>, the record Aquifer's
+        # Valkey cluster mode writes for itself), so print each record with
+        # its JSON. Older Canalis builds wrote canalis:instance:<addr>
+        # instead; that key is still accepted so this runner keeps working
+        # against either.
+        script = (
+            "sleep 6; "
+            "for k in $(valkey-cli -h valkey keys 'aqueduct:instance:*'); do "
+            "case \"$k\" in *:assignments|*:fullness) ;; "
+            "*) echo \"$k $(valkey-cli -h valkey get \"$k\")\";; esac; done; "
+            "valkey-cli -h valkey keys 'canalis:instance:*'"
+        )
         result = await (
             dag.container()
             .from_("valkey/valkey:8")
             .with_service_binding("valkey", valkey)
             .with_service_binding("canalis", canalis)
             .with_service_binding("aquifer", aquifer)
-            .with_exec(["sh", "-c", "sleep 6 && valkey-cli -h valkey keys 'canalis:instance:*'"])
+            .with_exec(["sh", "-c", script])
             .stdout()
         )
 
-        if "canalis:instance:" not in result:
-            raise RuntimeError(
-                f"expected a canalis:instance:* key in Valkey after real Aquifer->Canalis "
-                f"registration pings, got: {result!r}"
-            )
-        return f"registration: PASS ({result.strip()})"
+        for line in result.splitlines():
+            key, _, payload = line.partition(" ")
+            if not key.startswith("aqueduct:instance:") or not payload:
+                continue
+            try:
+                record = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if record.get("address", "").startswith("http") and record.get("state") == "active":
+                return f"registration: PASS ({key} -> {record['address']}, state {record['state']})"
+
+        if "canalis:instance:" in result:
+            return f"registration: PASS (legacy key: {result.strip()})"
+
+        raise RuntimeError(
+            "expected an active aqueduct:instance:* record (or a legacy canalis:instance:* key) "
+            f"in Valkey after real Aquifer->Canalis registration pings, got: {result!r}"
+        )
 
     @function
     async def test_aquifer_websocket(
