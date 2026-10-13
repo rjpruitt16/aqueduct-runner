@@ -354,9 +354,11 @@ class AqueductRunner:
 
     @function
     def build_spillway_websocket(self, source: dagger.Directory) -> Container:
-        """spillway with the same WebSocket contract limits used for Aquifer."""
+        """spillway with the same WebSocket contract limits used for Aquifer,
+        and its transcripts in Valkey streams like Aquifer's."""
         return (
             self.build_spillway(source)
+            .with_env_variable("SPILLWAY_VALKEY_URL", "redis://valkey:6379")
             .with_env_variable("SPILLWAY_ALLOWED_URL_DOMAINS", "backend")
             .with_env_variable("SPILLWAY_WS_MAX_CLIENT_CONNECTIONS", "3")
             .with_env_variable("SPILLWAY_WS_MAX_UPSTREAM_CONNECTIONS", "4")
@@ -480,10 +482,12 @@ class AqueductRunner:
         websocket_dir: dagger.Directory,
     ) -> str:
         """Runs the exact same WebSocket contract against spillway."""
+        valkey = self.build_valkey().with_exposed_port(6379).as_service()
         fixture = self.build_websocket_fixture(websocket_dir)
         backend = fixture.with_exposed_port(6060).as_service()
         target = (
             self.build_spillway_websocket(source)
+            .with_service_binding("valkey", valkey)
             .with_service_binding("backend", backend)
             .with_exposed_port(4000)
             .as_service()
