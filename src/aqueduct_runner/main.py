@@ -9,6 +9,7 @@ claim is checked at the wire level instead of trusted from reading the
 source of two separate implementations.
 """
 
+import difflib
 import hashlib
 import json
 import time
@@ -396,6 +397,46 @@ class AqueductRunner:
             .with_env_variable("AQUIFER_REGISTRY_URL", "http://canalis:8080/register")
             .with_env_variable("AQUIFER_REGISTRY_INTERVAL_SECONDS", "2")
         )
+
+    @function
+    async def test_claim_script(
+        self,
+        aquifer_source: dagger.Directory,
+        canalis_source: dagger.Directory,
+    ) -> str:
+        """Proves Aquifer and Canalis claim users with the same Lua.
+
+        They share one assignment table in Valkey (aqueduct:assignment:*),
+        and each claims through its own copy of the same script: Go in
+        Aquifer's cluster_valkey.go, Rust in Canalis's src/assign.rs. If the
+        copies drift, two services racing to claim the same user can follow
+        different rules against the same keys. This compares both the claim
+        and the release script, ignoring indentation and blank lines, and
+        fails with a diff on any other difference.
+        """
+        go = await aquifer_source.file("cluster_valkey.go").contents()
+        rust = await canalis_source.file("src/assign.rs").contents()
+
+        pairs = [
+            (
+                "claim",
+                _between(go, "assignClusterScopeScript = redis.NewScript(`", "`)"),
+                _between(rust, 'const ASSIGN_LUA: &str = r"', '";'),
+            ),
+            (
+                "release",
+                _between(go, "releaseClusterScopeScript = redis.NewScript(`", "`)"),
+                _between(rust, 'const RELEASE_LUA: &str = r"', '";'),
+            ),
+        ]
+        for name, aquifer_lua, canalis_lua in pairs:
+            a, c = _lua_lines(aquifer_lua), _lua_lines(canalis_lua)
+            if a != c:
+                diff = "\n".join(
+                    difflib.unified_diff(a, c, "aquifer/cluster_valkey.go", "canalis-rs/src/assign.rs", lineterm="")
+                )
+                raise RuntimeError(f"the {name} script differs between Aquifer and Canalis:\n{diff}")
+        return "claim-script: PASS (claim and release scripts match)"
 
     @function
     async def test_registration(
@@ -1683,3 +1724,20 @@ print(json.dumps({"result": "PASS", "shared_job": body(r1)["job_id"], "per_user_
     ) -> str:
         """Old name for test_spillway_drain."""
         return await self.test_spillway_drain(source, hurl_dir, recorder_dir)
+
+
+def _between(text: str, start: str, end: str) -> str:
+    """The text between the first `start` and the next `end` after it."""
+    i = text.find(start)
+    if i < 0:
+        raise RuntimeError(f"couldn't find {start!r}")
+    i += len(start)
+    j = text.find(end, i)
+    if j < 0:
+        raise RuntimeError(f"couldn't find the end {end!r} after {start!r}")
+    return text[i:j]
+
+
+def _lua_lines(lua: str) -> list[str]:
+    """Lua lines with indentation and blank lines dropped."""
+    return [line.strip() for line in lua.splitlines() if line.strip()]
