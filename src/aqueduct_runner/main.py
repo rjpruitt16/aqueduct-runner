@@ -726,6 +726,92 @@ class AqueductRunner:
             .stdout()
         )
 
+    async def _run_websocket_contract_via_canalis(
+        self,
+        case: str,
+        fixture: Container,
+        canalis_source: dagger.Directory,
+        node: Container,
+        node_port: int,
+    ) -> str:
+        """The same WebSocket contract, with Canalis in front: the node
+        registers with Canalis (role ws), and the client only ever talks to
+        ws://canalis:8080/websocket. Canalis picks the node and pipes frames
+        without reading them, so every check -- ordering, replay, reconnect,
+        live queue positions, the node's own limits, transcript expiry --
+        has to pass through it unchanged.
+
+        Every service is labeled with `case`: Dagger reuses identical
+        service definitions, and two cases sharing a Valkey or a backend
+        would see each other's sessions and registrations."""
+        valkey = self.build_valkey().with_env_variable("AQUEDUCT_RUNNER_CASE", case).with_exposed_port(6379).as_service()
+        backend = fixture.with_env_variable("AQUEDUCT_RUNNER_CASE", case).with_exposed_port(6060).as_service()
+        canalis = (
+            self.build_canalis(canalis_source)
+            .with_env_variable("AQUEDUCT_RUNNER_CASE", case)
+            .with_service_binding("valkey", valkey)
+            .with_exposed_port(8080)
+            .as_service()
+        )
+        node_service = (
+            node.with_service_binding("valkey", valkey)
+            .with_service_binding("backend", backend)
+            .with_service_binding("canalis", canalis)
+            .with_exposed_port(node_port)
+            .as_service()
+        )
+        # Wait for this node's own record (its id ends in its port), not
+        # just any record.
+        script = (
+            "for i in $(seq 1 90); do "
+            f"[ -n \"$(valkey-cli -h valkey keys 'aqueduct:instance:*:{node_port}')\" ] && break; sleep 1; done; "
+            "/websocket-fixture test --target ws://canalis:8080/websocket --backend ws://backend:6060/socket"
+        )
+        return await (
+            dag.container()
+            .from_("valkey/valkey:8")
+            .with_file("/websocket-fixture", fixture.file("/websocket-fixture"))
+            .with_service_binding("valkey", valkey)
+            .with_service_binding("backend", backend)
+            .with_service_binding("canalis", canalis)
+            .with_service_binding("node", node_service)
+            .with_env_variable("CACHE_BUST", str(time.time()))
+            .with_exec(["sh", "-c", script])
+            .stdout()
+        )
+
+    @function
+    async def test_canalis_websocket(
+        self,
+        aquifer_source: dagger.Directory,
+        spillway_source: dagger.Directory,
+        canalis_source: dagger.Directory,
+        websocket_dir: dagger.Directory,
+    ) -> str:
+        """The shared WebSocket contract run through Canalis, once in front
+        of Aquifer and once in front of Spillway."""
+        fixture = self.build_websocket_fixture(websocket_dir)
+        results = []
+
+        aquifer = (
+            self.build_aquifer_websocket(aquifer_source)
+            .with_env_variable("AQUIFER_REGISTRY_URL", "http://canalis:8080/register")
+            .with_env_variable("AQUIFER_REGISTRY_INTERVAL_SECONDS", "2")
+            .with_env_variable("AQUIFER_REGISTRY_ROLE", "ws")
+        )
+        out = await self._run_websocket_contract_via_canalis("aquifer", fixture, canalis_source, aquifer, 8080)
+        results.append(f"via Canalis -> Aquifer: {out.strip()}")
+
+        spillway = (
+            self.build_spillway_websocket(spillway_source)
+            .with_env_variable("SPILLWAY_REGISTRY_URL", "http://canalis:8080/register")
+            .with_env_variable("SPILLWAY_REGISTRY_INTERVAL_SECONDS", "2")
+            .with_env_variable("SPILLWAY_REGISTRY_ROLE", "ws")
+        )
+        out = await self._run_websocket_contract_via_canalis("spillway", fixture, canalis_source, spillway, 4000)
+        results.append(f"via Canalis -> Spillway: {out.strip()}")
+        return "\n".join(results)
+
     @function
     async def test_websocket_parity(
         self,
