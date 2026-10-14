@@ -518,6 +518,146 @@ class AqueductRunner:
             f"in Valkey after real Aquifer->Canalis registration pings, got: {result!r}"
         )
 
+    def build_spillway_registration(self, source: dagger.Directory) -> Container:
+        """Spillway's own image, pinging the "canalis" service alias every
+        2s (vs. the 15s production default) -- Spillway's counterpart to
+        build_aquifer_registration."""
+        return (
+            self.build_spillway(source)
+            .with_env_variable("SPILLWAY_REGISTRY_URL", "http://canalis:8080/register")
+            .with_env_variable("SPILLWAY_REGISTRY_INTERVAL_SECONDS", "2")
+        )
+
+    async def _canalis_records(
+        self, valkey: Service, canalis: Service, nodes: dict[str, Service], expect: int, settle: int = 0
+    ) -> list[dict]:
+        """Starts the given nodes alongside Canalis, waits (up to 60s) until
+        Canalis's shared table lists `expect` instances, waits `settle`
+        more seconds for anything else to try, then returns every
+        aqueduct:instance:<id> record, read straight from Valkey."""
+        script = (
+            f"for i in $(seq 1 60); do "
+            f"[ \"$(valkey-cli -h valkey scard aqueduct:instances)\" -ge {expect} ] && break; sleep 1; done; "
+            f"sleep {settle}; "
+            "for k in $(valkey-cli -h valkey keys 'aqueduct:instance:*'); do "
+            "case \"$k\" in *:assignments|*:fullness) ;; "
+            "*) echo \"$k $(valkey-cli -h valkey get \"$k\")\";; esac; done"
+        )
+        checker = (
+            dag.container()
+            .from_("valkey/valkey:8")
+            .with_service_binding("valkey", valkey)
+            .with_service_binding("canalis", canalis)
+        )
+        for alias, node in nodes.items():
+            checker = checker.with_service_binding(alias, node)
+        out = await checker.with_env_variable("CACHE_BUST", str(time.time())).with_exec(["sh", "-c", script]).stdout()
+
+        records = []
+        for line in out.splitlines():
+            key, _, payload = line.partition(" ")
+            try:
+                records.append(json.loads(payload))
+            except json.JSONDecodeError:
+                continue
+        return records
+
+    @function
+    async def test_spillway_registration(
+        self,
+        spillway_source: dagger.Directory,
+        canalis_source: dagger.Directory,
+    ) -> str:
+        """test_registration's Spillway half: a real Spillway, configured
+        only via SPILLWAY_REGISTRY_URL, pings a real Canalis, which records
+        it, active, in the shared aqueduct:instance table. Spillway's ping
+        has to carry `state` for that (spillway#51)."""
+        valkey = self.build_valkey().with_exposed_port(6379).as_service()
+        canalis = (
+            self.build_canalis(canalis_source)
+            .with_service_binding("valkey", valkey)
+            .with_exposed_port(8080)
+            .as_service()
+        )
+        spillway = (
+            self.build_spillway_registration(spillway_source)
+            .with_service_binding("canalis", canalis)
+            .with_exposed_port(4000)
+            .as_service()
+        )
+        records = await self._canalis_records(valkey, canalis, {"spillway": spillway}, expect=1)
+        for record in records:
+            if record.get("address", "").endswith(":4000") and record.get("state") == "active":
+                return f"spillway registration: PASS ({record['id']} -> {record['address']}, state active)"
+        raise RuntimeError(f"expected an active Spillway (port 4000) record in Canalis's table, got: {records!r}")
+
+    # Test-only L8 keys (Go's 64-byte ed25519 format, which Aquifer and
+    # Spillway both read from L8_PRIVATE_KEY). They exist so Canalis's
+    # allowlist can name the nodes in test_signed_registration; nothing
+    # real is signed with them.
+    _TEST_AQUIFER_KEY = "H8Gs42KB82XOZC72eMPcdW2g8B5Z7sMoCjmxRylruDIUJVyN47u3zjxdz2N+JByv4R9AQfsBXDOtfxJV9+rDtg=="
+    _TEST_AQUIFER_PUB = "FCVcjeO7t848Xc9jfiQcr+EfQEH7AVwzrX8SVffqw7Y="
+    _TEST_SPILLWAY_KEY = "dZyIgvj8FE1U3HrvU0p9vajrES2mBEAvQIRTdXAr2J1bYI+7/bIN5xhsl006aYpx3Afx8ut5OULNAUbVjBmv2Q=="
+    _TEST_SPILLWAY_PUB = "W2CPu/2yDecYbJdNOmmKcdwH8fLreTlCzQFG1YwZr9k="
+    _TEST_UNTRUSTED_KEY = "dwwlDwvyGS0vjuAe6l1YNaKJwuNATsGtiZC6iTLwwtZ2hjKho0y4XZezEvkeFfZZowZmSDOLHU5ZxeZ+XVm4MQ=="
+
+    @function
+    async def test_signed_registration(
+        self,
+        aquifer_source: dagger.Directory,
+        spillway_source: dagger.Directory,
+        canalis_source: dagger.Directory,
+    ) -> str:
+        """Canalis accepting only the nodes it trusts. Canalis runs with
+        CANALIS_L8_TRUSTED_NODE_KEYS naming one Aquifer key and one Spillway
+        key, and CANALIS_REQUIRE_SIGNED_REGISTRATION=true. Both trusted
+        nodes complete the L8 handshake with Canalis on their own and sign
+        their pings, so both get recorded; a third node, an Aquifer with a
+        key that isn't on the list, is refused at the handshake and again at
+        /register, so it never appears."""
+        valkey = self.build_valkey().with_exposed_port(6379).as_service()
+        canalis = (
+            self.build_canalis(canalis_source)
+            .with_env_variable("CANALIS_L8_TRUSTED_NODE_KEYS", f"{self._TEST_AQUIFER_PUB},{self._TEST_SPILLWAY_PUB}")
+            .with_env_variable("CANALIS_REQUIRE_SIGNED_REGISTRATION", "true")
+            .with_service_binding("valkey", valkey)
+            .with_exposed_port(8080)
+            .as_service()
+        )
+
+        def aquifer_with(key: str) -> Service:
+            return (
+                self.build_aquifer_registration(aquifer_source)
+                .with_env_variable("L8_PRIVATE_KEY", key)
+                .with_service_binding("canalis", canalis)
+                .with_exposed_port(8080)
+                .as_service()
+            )
+
+        spillway = (
+            self.build_spillway_registration(spillway_source)
+            .with_env_variable("L8_PRIVATE_KEY", self._TEST_SPILLWAY_KEY)
+            .with_service_binding("canalis", canalis)
+            .with_exposed_port(4000)
+            .as_service()
+        )
+        nodes = {
+            "aquifer": aquifer_with(self._TEST_AQUIFER_KEY),
+            "spillway": spillway,
+            "untrusted": aquifer_with(self._TEST_UNTRUSTED_KEY),
+        }
+        # Wait for the two trusted nodes, then give the untrusted one a few
+        # more ping intervals to try.
+        records = await self._canalis_records(valkey, canalis, nodes, expect=2, settle=6)
+
+        ports = sorted(r.get("address", "").rsplit(":", 1)[-1] for r in records)
+        if ports != ["4000", "8080"] or any(r.get("state") != "active" for r in records):
+            raise RuntimeError(
+                "expected exactly the trusted Aquifer (8080) and Spillway (4000), active, and nothing "
+                f"from the untrusted node; got: {records!r}"
+            )
+        return "signed registration: PASS (trusted Aquifer and Spillway registered; untrusted node refused)"
+
     @function
     async def test_aquifer_websocket(
         self,
