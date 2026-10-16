@@ -659,6 +659,100 @@ class AqueductRunner:
         return "signed registration: PASS (trusted Aquifer and Spillway registered; untrusted node refused)"
 
     @function
+    async def test_shared_learned_keys(
+        self,
+        aquifer_source: dagger.Directory,
+        canalis_source: dagger.Directory,
+    ) -> str:
+        """Two Canalis nodes sharing one Valkey, both requiring signed
+        registration with no allowlist. A real Aquifer shakes hands with
+        Canalis A and registers there. A ping signed with that same Aquifer
+        key is then sent to Canalis B, which never saw the handshake: B has
+        to trust it, because the key A learned is shared in Valkey. A ping
+        signed with a key no node learned is still refused."""
+        valkey = self.build_valkey().with_exposed_port(6379).as_service()
+
+        def canalis(node_id: str) -> Service:
+            # CANALIS_NODE_ID also keeps Dagger from treating the two as one
+            # service.
+            return (
+                self.build_canalis(canalis_source)
+                .with_env_variable("CANALIS_REQUIRE_SIGNED_REGISTRATION", "true")
+                .with_env_variable("CANALIS_NODE_ID", node_id)
+                .with_service_binding("valkey", valkey)
+                .with_exposed_port(8080)
+                .as_service()
+            )
+
+        canalis_a, canalis_b = canalis("a"), canalis("b")
+        aquifer = (
+            self.build_aquifer_registration(aquifer_source)
+            .with_env_variable("L8_PRIVATE_KEY", self._TEST_AQUIFER_KEY)
+            .with_service_binding("canalis", canalis_a)
+            .with_exposed_port(8080)
+            .as_service()
+        )
+        script = f"""
+import base64, hashlib, json, time, urllib.request, urllib.error
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+def wait_for_instance():
+    for _ in range(60):
+        try:
+            text = urllib.request.urlopen("http://canalis-a:8080/metrics", timeout=3).read().decode()
+            if "canalis_instance_up{{" in text:
+                return
+        except Exception:
+            pass
+        time.sleep(1)
+    raise SystemExit("Aquifer never registered with Canalis A")
+
+def signed_ping(key_b64, delivery_id):
+    raw = base64.b64decode(key_b64)
+    key = Ed25519PrivateKey.from_private_bytes(raw[:32])
+    public = raw[32:64]
+    body = b'{{"port":"9999"}}'
+    ts = str(int(time.time()))
+    message = f"{{delivery_id}}.{{ts}}.{{base64.b64encode(hashlib.sha256(body).digest()).decode()}}"
+    request = urllib.request.Request("http://canalis-b:8080/register", data=body, method="POST", headers={{
+        "Content-Type": "application/json",
+        "X-L8-Signature": base64.b64encode(key.sign(message.encode())).decode(),
+        "X-L8-Delivery-Id": delivery_id,
+        "X-L8-Timestamp": ts,
+        "X-L8-Key-Id": base64.b64encode(public[:8]).decode(),
+    }})
+    try:
+        return urllib.request.urlopen(request, timeout=5).status
+    except urllib.error.HTTPError as err:
+        return err.code
+
+wait_for_instance()
+print(json.dumps({{
+    "learned_elsewhere": signed_ping("{self._TEST_AQUIFER_KEY}", "shared-1"),
+    "never_learned": signed_ping("{self._TEST_UNTRUSTED_KEY}", "shared-2"),
+}}))
+"""
+        out = await (
+            dag.container()
+            .from_("python:3.12-slim")
+            .with_exec(["pip", "install", "--quiet", "cryptography"])
+            .with_service_binding("valkey", valkey)
+            .with_service_binding("canalis-a", canalis_a)
+            .with_service_binding("canalis-b", canalis_b)
+            .with_service_binding("aquifer", aquifer)
+            .with_env_variable("CACHE_BUST", str(time.time()))
+            .with_exec(["python", "-c", script])
+            .stdout()
+        )
+        result = json.loads(out.strip().splitlines()[-1])
+        if result != {"learned_elsewhere": 200, "never_learned": 401}:
+            raise RuntimeError(
+                "expected Canalis B to accept a ping signed with the key Canalis A learned (200) and to refuse "
+                f"a key no node learned (401); got {result!r}"
+            )
+        return "shared L8 keys: PASS (Canalis B trusted the key Canalis A learned; an unknown key was refused)"
+
+    @function
     async def test_aquifer_websocket(
         self,
         source: dagger.Directory,
