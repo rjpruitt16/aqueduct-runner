@@ -753,6 +753,164 @@ print(json.dumps({{
         return "shared L8 keys: PASS (Canalis B trusted the key Canalis A learned; an unknown key was refused)"
 
     @function
+    def build_canalis_plugins(self, inlet_source: dagger.Directory) -> dagger.Directory:
+        """Inlet's providers compiled into Canalis webhook plugins
+        (plugins/canalis in Inlet), with pinned extism-js and Binaryen."""
+        script = r"""
+set -eu
+case "$(uname -m)" in x86_64) arch=x86_64 ;; aarch64|arm64) arch=aarch64 ;; *) echo "unsupported $(uname -m)"; exit 1 ;; esac
+cd /tmp
+curl -fsSLO "https://github.com/extism/js-pdk/releases/download/v1.7.0/extism-js-$arch-linux-v1.7.0.gz"
+curl -fsSLO "https://github.com/extism/js-pdk/releases/download/v1.7.0/extism-js-$arch-linux-v1.7.0.gz.sha256"
+echo "$(cat extism-js-$arch-linux-v1.7.0.gz.sha256 | awk '{print $1}')  extism-js-$arch-linux-v1.7.0.gz" | sha256sum -c -
+gunzip "extism-js-$arch-linux-v1.7.0.gz" && install -m 755 "extism-js-$arch-linux-v1.7.0" /usr/local/bin/extism-js
+curl -fsSLO "https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-$arch-linux.tar.gz"
+curl -fsSLO "https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-$arch-linux.tar.gz.sha256"
+echo "$(cat binaryen-version_133-$arch-linux.tar.gz.sha256 | awk '{print $1}')  binaryen-version_133-$arch-linux.tar.gz" | sha256sum -c -
+tar xzf "binaryen-version_133-$arch-linux.tar.gz" && cp binaryen-version_133/bin/* /usr/local/bin/ && cp -r binaryen-version_133/lib/* /usr/local/lib/ 2>/dev/null || true
+cd /inlet && npm ci --silent && npm run -s build:canalis-plugins
+"""
+        return (
+            dag.container()
+            # Debian 13: the Linux extism-js needs glibc 2.39.
+            .from_("node:22-trixie-slim")
+            .with_exec(["sh", "-c", "apt-get update -qq && apt-get install -y -qq curl ca-certificates >/dev/null"])
+            .with_directory("/inlet", inlet_source, exclude=["node_modules", "dist"])
+            .with_exec(["sh", "-c", script])
+            .directory("/inlet/dist/canalis")
+        )
+
+    @function
+    async def test_canalis_hooks(
+        self,
+        inlet_source: dagger.Directory,
+        aquifer_source: dagger.Directory,
+        canalis_source: dagger.Directory,
+    ) -> str:
+        """A real Shopify webhook through Canalis's plugin host. The Shopify
+        plugin is built from Inlet's own provider code; Canalis loads it
+        and serves POST /hooks/shopify; a real Aquifer registers with
+        Canalis and delivers verified events to a recorder standing in for
+        the app. A signed delivery is accepted and delivered once, its
+        retries are duplicates, and a bad signature is refused."""
+        plugins = self.build_canalis_plugins(inlet_source)
+        valkey = self.build_valkey().with_exposed_port(6379).as_service()
+        recorder_script = r"""
+import http.server, json
+received = []
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("content-length", 0)))
+        received.append({"path": self.path, "topic": self.headers.get("x-shopify-topic"), "body": body.decode()})
+        self.send_response(200); self.send_header("content-length", "2"); self.end_headers(); self.wfile.write(b"ok")
+    def do_GET(self):
+        out = json.dumps(received).encode()
+        self.send_response(200); self.send_header("content-length", str(len(out))); self.end_headers(); self.wfile.write(out)
+    def log_message(self, *a): pass
+http.server.ThreadingHTTPServer(("0.0.0.0", 9800), H).serve_forever()
+"""
+        recorder = (
+            dag.container()
+            .from_("python:3.12-slim")
+            .with_env_variable("AQUEDUCT_RUNNER_CASE", "hooks-recorder")
+            .with_exposed_port(9800)
+            # The server runs as the service, not as a build step (a
+            # with_exec here would never finish).
+            .as_service(args=["python", "-c", recorder_script])
+        )
+        canalis = (
+            self.build_canalis(canalis_source)
+            .with_directory("/plugins", plugins)
+            .with_env_variable("SHOPIFY_WEBHOOK_SECRET", "shpss_contract_test")
+            .with_env_variable("CANALIS_HOOK_SHOPIFY_TARGET", "http://recorder:9800/webhooks/shopify")
+            .with_env_variable("CANALIS_LINE_SWEEP_SECONDS", "1")
+            .with_service_binding("valkey", valkey)
+            .with_service_binding("recorder", recorder)
+            .with_exposed_port(8080)
+            .as_service()
+        )
+        aquifer = (
+            self.build_aquifer_registration(aquifer_source)
+            .with_service_binding("canalis", canalis)
+            .with_service_binding("recorder", recorder)
+            .with_exposed_port(8080)
+            .as_service()
+        )
+        script = r"""
+import base64, hashlib, hmac, json, time, urllib.request, urllib.error
+
+def get(url):
+    return urllib.request.urlopen(url, timeout=5).read().decode()
+
+for _ in range(90):
+    try:
+        if "canalis_instance_up{" in get("http://canalis:8080/metrics"):
+            break
+    except Exception:
+        pass
+    time.sleep(1)
+else:
+    raise SystemExit("Aquifer never registered with Canalis")
+
+body = json.dumps({"id": 1001, "customer": {"id": 456}}).encode()
+good = base64.b64encode(hmac.new(b"shpss_contract_test", body, hashlib.sha256).digest()).decode()
+
+def send(signature, webhook_id):
+    request = urllib.request.Request("http://canalis:8080/hooks/shopify", data=body, method="POST", headers={
+        "Content-Type": "application/json", "X-Shopify-Hmac-Sha256": signature, "X-Shopify-Webhook-Id": webhook_id,
+        "X-Shopify-Topic": "orders/create", "X-Shopify-Shop-Domain": "acme.myshopify.com"})
+    try:
+        r = urllib.request.urlopen(request, timeout=10)
+        return [r.status, json.loads(r.read()).get("status")]
+    except urllib.error.HTTPError as err:
+        return [err.code, None]
+
+result = {
+    "signed": send(good, "wh-1"),
+    "retry": send(good, "wh-1"),
+    "forged": send(base64.b64encode(b"x" * 32).decode(), "wh-2"),
+}
+for _ in range(60):
+    received = json.loads(get("http://recorder:9800/"))
+    if received:
+        break
+    time.sleep(1)
+time.sleep(3)  # long enough for a second, unwanted delivery to show up
+received = json.loads(get("http://recorder:9800/"))
+result["deliveries"] = len(received)
+result["delivered"] = received[0] if received else None
+print(json.dumps(result))
+"""
+        out = await (
+            dag.container()
+            .from_("python:3.12-slim")
+            .with_service_binding("valkey", valkey)
+            .with_service_binding("recorder", recorder)
+            .with_service_binding("canalis", canalis)
+            .with_service_binding("aquifer", aquifer)
+            .with_env_variable("CACHE_BUST", str(time.time()))
+            .with_exec(["python", "-c", script])
+            .stdout()
+        )
+        result = json.loads(out.strip().splitlines()[-1])
+        delivered = result.get("delivered") or {}
+        ok = (
+            result["signed"] == [200, "accepted"]
+            and result["retry"] == [200, "duplicate"]
+            and result["forged"][0] == 401
+            and result["deliveries"] == 1
+            and delivered.get("path") == "/webhooks/shopify"
+            and delivered.get("topic") == "orders/create"
+            and json.loads(delivered.get("body") or "{}").get("id") == 1001
+        )
+        if not ok:
+            raise RuntimeError(
+                "expected the signed Shopify webhook accepted and delivered exactly once with its topic and body, "
+                f"its retry a duplicate, and the forged one refused with 401; got {result!r}"
+            )
+        return "canalis hooks: PASS (Shopify plugin from Inlet: accepted, delivered once, retry deduplicated, forgery refused)"
+
+    @function
     async def test_aquifer_websocket(
         self,
         source: dagger.Directory,
