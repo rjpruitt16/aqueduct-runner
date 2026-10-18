@@ -9,6 +9,7 @@ claim is checked at the wire level instead of trusted from reading the
 source of two separate implementations.
 """
 
+import base64
 import difflib
 import hashlib
 import json
@@ -787,12 +788,14 @@ cd /inlet && npm ci --silent && npm run -s build:canalis-plugins
         aquifer_source: dagger.Directory,
         canalis_source: dagger.Directory,
     ) -> str:
-        """A real Shopify webhook through Canalis's plugin host. The Shopify
-        plugin is built from Inlet's own provider code; Canalis loads it
-        and serves POST /hooks/shopify; a real Aquifer registers with
-        Canalis and delivers verified events to a recorder standing in for
-        the app. A signed delivery is accepted and delivered once, its
-        retries are duplicates, and a bad signature is refused."""
+        """Real webhooks from Shopify, GitHub, Stripe and Anthropic through
+        Canalis's plugin host. The plugins are built from Inlet's own
+        provider code; Canalis loads them and serves POST /hooks/<name>; a
+        real Aquifer registers with Canalis and delivers verified events to
+        a recorder standing in for the app. For each provider, a signed
+        delivery is accepted and delivered once, its retry is a duplicate,
+        and a bad signature is refused; for the two that sign a timestamp,
+        an hour-old signature is refused too."""
         plugins = self.build_canalis_plugins(inlet_source)
         valkey = self.build_valkey().with_exposed_port(6379).as_service()
         recorder_script = r"""
@@ -801,7 +804,7 @@ received = []
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("content-length", 0)))
-        received.append({"path": self.path, "topic": self.headers.get("x-shopify-topic"), "body": body.decode()})
+        received.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}, "body": body.decode()})
         self.send_response(200); self.send_header("content-length", "2"); self.end_headers(); self.wfile.write(b"ok")
     def do_GET(self):
         out = json.dumps(received).encode()
@@ -818,17 +821,28 @@ http.server.ThreadingHTTPServer(("0.0.0.0", 9800), H).serve_forever()
             # with_exec here would never finish).
             .as_service(args=["python", "-c", recorder_script])
         )
+        secrets = {
+            "SHOPIFY_WEBHOOK_SECRET": "shpss_contract_test",
+            "GITHUB_WEBHOOK_SECRET": "github_contract_test",
+            "STRIPE_WEBHOOK_SECRET": "whsec_stripe_contract_test",
+            # Standard Webhooks: whsec_ + the base64 of the signing key.
+            "ANTHROPIC_WEBHOOK_SECRET": "whsec_" + base64.b64encode(b"anthropic-contract-test-key-32by").decode(),
+        }
         canalis = (
             self.build_canalis(canalis_source)
             .with_directory("/plugins", plugins)
-            .with_env_variable("SHOPIFY_WEBHOOK_SECRET", "shpss_contract_test")
-            .with_env_variable("CANALIS_HOOK_SHOPIFY_TARGET", "http://recorder:9800/webhooks/shopify")
             .with_env_variable("CANALIS_LINE_SWEEP_SECONDS", "1")
             .with_service_binding("valkey", valkey)
             .with_service_binding("recorder", recorder)
             .with_exposed_port(8080)
-            .as_service()
         )
+        for name, value in secrets.items():
+            canalis = canalis.with_env_variable(name, value)
+        for provider in ["shopify", "github", "stripe", "anthropic"]:
+            canalis = canalis.with_env_variable(
+                f"CANALIS_HOOK_{provider.upper()}_TARGET", f"http://recorder:9800/webhooks/{provider}"
+            )
+        canalis = canalis.as_service()
         aquifer = (
             self.build_aquifer_registration(aquifer_source)
             .with_service_binding("canalis", canalis)
@@ -837,7 +851,7 @@ http.server.ThreadingHTTPServer(("0.0.0.0", 9800), H).serve_forever()
             .as_service()
         )
         script = r"""
-import base64, hashlib, hmac, json, time, urllib.request, urllib.error
+import base64, hashlib, hmac, json, os, time, urllib.request, urllib.error
 
 def get(url):
     return urllib.request.urlopen(url, timeout=5).read().decode()
@@ -852,33 +866,65 @@ for _ in range(90):
 else:
     raise SystemExit("Aquifer never registered with Canalis")
 
-body = json.dumps({"id": 1001, "customer": {"id": 456}}).encode()
-good = base64.b64encode(hmac.new(b"shpss_contract_test", body, hashlib.sha256).digest()).decode()
-
-def send(signature, webhook_id):
-    request = urllib.request.Request("http://canalis:8080/hooks/shopify", data=body, method="POST", headers={
-        "Content-Type": "application/json", "X-Shopify-Hmac-Sha256": signature, "X-Shopify-Webhook-Id": webhook_id,
-        "X-Shopify-Topic": "orders/create", "X-Shopify-Shop-Domain": "acme.myshopify.com"})
+def send(provider, body, headers):
+    request = urllib.request.Request(f"http://canalis:8080/hooks/{provider}", data=body, method="POST",
+                                     headers={"Content-Type": "application/json", **headers})
     try:
         r = urllib.request.urlopen(request, timeout=10)
         return [r.status, json.loads(r.read()).get("status")]
     except urllib.error.HTTPError as err:
         return [err.code, None]
 
-result = {
-    "signed": send(good, "wh-1"),
-    "retry": send(good, "wh-1"),
-    "forged": send(base64.b64encode(b"x" * 32).decode(), "wh-2"),
+def hmac256(key, message):
+    return hmac.new(key, message, hashlib.sha256)
+
+# Each provider signs the way its own docs say. make(key, event_id, ts)
+# returns (body, headers); ts is the signed time for those that sign one.
+def shopify(key, event_id, ts):
+    body = json.dumps({"id": 1001, "customer": {"id": 456}}).encode()
+    return body, {"X-Shopify-Hmac-Sha256": base64.b64encode(hmac256(key, body).digest()).decode(),
+                  "X-Shopify-Webhook-Id": event_id, "X-Shopify-Topic": "orders/create",
+                  "X-Shopify-Shop-Domain": "acme.myshopify.com"}
+
+def github(key, event_id, ts):
+    body = json.dumps({"action": "opened", "installation": {"id": 42}}).encode()
+    return body, {"X-Hub-Signature-256": "sha256=" + hmac256(key, body).hexdigest(),
+                  "X-GitHub-Delivery": event_id, "X-GitHub-Event": "pull_request"}
+
+def stripe(key, event_id, ts):
+    body = json.dumps({"id": event_id, "type": "invoice.paid", "account": "acct_42"}).encode()
+    return body, {"Stripe-Signature": f"t={ts},v1=" + hmac256(key, f"{ts}.".encode() + body).hexdigest()}
+
+def anthropic(key, event_id, ts):
+    body = json.dumps({"type": "event", "data": {"type": "session.completed", "id": "sess_42"}}).encode()
+    signature = base64.b64encode(hmac256(key, f"{event_id}.{ts}.".encode() + body).digest()).decode()
+    return body, {"webhook-id": event_id, "webhook-timestamp": str(ts), "webhook-signature": f"v1,{signature}"}
+
+keys = {
+    "shopify": b"shpss_contract_test",
+    "github": b"github_contract_test",
+    "stripe": b"whsec_stripe_contract_test",
+    "anthropic": b"anthropic-contract-test-key-32by",
 }
+makers = {"shopify": shopify, "github": github, "stripe": stripe, "anthropic": anthropic}
+result = {}
+now = int(time.time())
+for provider, make in makers.items():
+    body, headers = make(keys[provider], f"{provider}-evt-1", now)
+    r = {"signed": send(provider, body, headers), "retry": send(provider, body, headers)}
+    body, headers = make(b"not-the-secret-not-the-secret-xx", f"{provider}-evt-2", now)
+    r["forged"] = send(provider, body, headers)
+    if provider in ("stripe", "anthropic"):
+        body, headers = make(keys[provider], f"{provider}-evt-3", now - 3600)
+        r["stale"] = send(provider, body, headers)
+    result[provider] = r
+
 for _ in range(60):
-    received = json.loads(get("http://recorder:9800/"))
-    if received:
+    if len(json.loads(get("http://recorder:9800/"))) >= len(makers):
         break
     time.sleep(1)
 time.sleep(3)  # long enough for a second, unwanted delivery to show up
-received = json.loads(get("http://recorder:9800/"))
-result["deliveries"] = len(received)
-result["delivered"] = received[0] if received else None
+result["received"] = json.loads(get("http://recorder:9800/"))
 print(json.dumps(result))
 """
         out = await (
@@ -893,22 +939,37 @@ print(json.dumps(result))
             .stdout()
         )
         result = json.loads(out.strip().splitlines()[-1])
-        delivered = result.get("delivered") or {}
-        ok = (
-            result["signed"] == [200, "accepted"]
-            and result["retry"] == [200, "duplicate"]
-            and result["forged"][0] == 401
-            and result["deliveries"] == 1
-            and delivered.get("path") == "/webhooks/shopify"
-            and delivered.get("topic") == "orders/create"
-            and json.loads(delivered.get("body") or "{}").get("id") == 1001
-        )
-        if not ok:
-            raise RuntimeError(
-                "expected the signed Shopify webhook accepted and delivered exactly once with its topic and body, "
-                f"its retry a duplicate, and the forged one refused with 401; got {result!r}"
-            )
-        return "canalis hooks: PASS (Shopify plugin from Inlet: accepted, delivered once, retry deduplicated, forgery refused)"
+        received = result.pop("received")
+        by_path: dict[str, list] = {}
+        for delivery in received:
+            by_path.setdefault(delivery["path"], []).append(delivery)
+        # What each delivery must carry through to the app.
+        expect = {
+            "shopify": lambda d: d["headers"].get("x-shopify-topic") == "orders/create" and json.loads(d["body"]).get("id") == 1001,
+            "github": lambda d: d["headers"].get("x-github-event") == "pull_request" and json.loads(d["body"]).get("action") == "opened",
+            "stripe": lambda d: json.loads(d["body"]).get("type") == "invoice.paid",
+            "anthropic": lambda d: json.loads(d["body"]).get("data", {}).get("type") == "session.completed",
+        }
+        problems = []
+        for provider, check in expect.items():
+            r = result[provider]
+            if r["signed"] != [200, "accepted"]:
+                problems.append(f"{provider}: signed delivery answered {r['signed']}")
+            if r["retry"] != [200, "duplicate"]:
+                problems.append(f"{provider}: retry answered {r['retry']}, not a duplicate")
+            if r["forged"][0] != 401:
+                problems.append(f"{provider}: forged signature answered {r['forged']}, not 401")
+            if "stale" in r and r["stale"][0] != 401:
+                problems.append(f"{provider}: hour-old signature answered {r['stale']}, not 401")
+            got = by_path.get(f"/webhooks/{provider}", [])
+            if len(got) != 1:
+                problems.append(f"{provider}: delivered {len(got)} times, not once")
+            elif not check(got[0]):
+                problems.append(f"{provider}: delivered without its event type or body: {got[0]!r}")
+        if problems:
+            raise RuntimeError("canalis hooks: " + "; ".join(problems) + f"; full result {result!r}")
+        return ("canalis hooks: PASS (Shopify, GitHub, Stripe and Anthropic plugins from Inlet: accepted, "
+                "delivered once, retries deduplicated, forgeries and stale signatures refused)")
 
     @function
     async def test_aquifer_websocket(
