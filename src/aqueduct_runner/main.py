@@ -94,6 +94,7 @@ _L8_SCHEMA_SUITE_FILES = ["shared/test_l8_request_schemas.hurl"]
 _SUITE_FILES = [
     "shared/test_health.hurl",
     "shared/test_job_lifecycle.hurl",
+    "shared/test_optional_webhook.hurl",
     "shared/test_idempotency.hurl",
     "shared/test_retry_policy.hurl",
     "shared/test_proxy_direct.hurl",
