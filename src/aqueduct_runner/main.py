@@ -410,13 +410,17 @@ class AqueductRunner:
 
         They share one assignment table in Valkey (aqueduct:assignment:*),
         and each claims through its own copy of the same script: Go in
-        Aquifer's cluster_valkey.go, Rust in Canalis's src/assign.rs. If the
+        Aquifer's internal/cluster/valkey.go, Rust in Canalis's src/assign.rs. If the
         copies drift, two services racing to claim the same user can follow
         different rules against the same keys. This compares both the claim
         and the release script, ignoring indentation and blank lines, and
         fails with a diff on any other difference.
         """
-        go = await aquifer_source.file("cluster_valkey.go").contents()
+        # internal/cluster/valkey.go since aquifer#117; cluster_valkey.go before.
+        try:
+            go = await aquifer_source.file("internal/cluster/valkey.go").contents()
+        except dagger.QueryError:
+            go = await aquifer_source.file("cluster_valkey.go").contents()
         rust = await canalis_source.file("src/assign.rs").contents()
 
         pairs = [
@@ -435,7 +439,7 @@ class AqueductRunner:
             a, c = _lua_lines(aquifer_lua), _lua_lines(canalis_lua)
             if a != c:
                 diff = "\n".join(
-                    difflib.unified_diff(a, c, "aquifer/cluster_valkey.go", "canalis-rs/src/assign.rs", lineterm="")
+                    difflib.unified_diff(a, c, "aquifer/internal/cluster/valkey.go", "canalis-rs/src/assign.rs", lineterm="")
                 )
                 raise RuntimeError(f"the {name} script differs between Aquifer and Canalis:\n{diff}")
         return "claim-script: PASS (claim and release scripts match)"
