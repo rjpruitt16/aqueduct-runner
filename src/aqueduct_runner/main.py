@@ -520,7 +520,8 @@ class AqueductRunner:
                 return f"registration: PASS ({key} -> {record['address']}, state {record['state']}; {load})"
 
         if "canalis:instance:" in result:
-            return f"registration: PASS (legacy key: {result.strip()})"
+            load = await self._require_load_headers(aquifer, "http://node:8080/health", "Aquifer")
+            return f"registration: PASS (legacy key: {result.strip()}; {load})"
 
         raise RuntimeError(
             "expected an active aqueduct:instance:* record (or a legacy canalis:instance:* key) "
@@ -537,30 +538,32 @@ class AqueductRunner:
 
     async def _require_load_headers(self, node: dagger.Service, url: str, name: str) -> str:
         """Checks a node's response carries its load: all four headers,
-        whole numbers, each capacity at least what's in use. Retries for a
-        few seconds, since a node may take one reading before it has any."""
+        whole numbers, each capacity at least what's in use, on a 200.
+        Retries for a few seconds, since a node may take one reading before
+        it has any."""
         script = (
             "import sys, time, urllib.request\n"
+            "want = sys.argv[2:]\n"
             "for _ in range(20):\n"
             "    try:\n"
             "        with urllib.request.urlopen(sys.argv[1], timeout=5) as r:\n"
             "            h = {k.lower(): v for k, v in r.headers.items()}\n"
-            "    except urllib.error.HTTPError as e:\n"
-            "        h = {k.lower(): v for k, v in e.headers.items()}\n"
-            "    except OSError:\n"
-            "        h = {}\n"
-            "    if 'x-aqueduct-ws-capacity' in h:\n"
+            "    except OSError as e:\n"
+            "        h = {'error': str(e)}\n"
+            "    if all(k in h for k in want):\n"
             "        break\n"
             "    time.sleep(0.5)\n"
             "for k, v in sorted(h.items()):\n"
             "    if k.startswith('x-aqueduct-'):\n"
             "        print(f'{k}: {v}')\n"
+            "if 'error' in h:\n"
+            "    print(f\"error: {h['error']}\")\n"
         )
         out = await (
             dag.container()
             .from_("python:3.12-alpine")
             .with_service_binding("node", node)
-            .with_exec(["python", "-c", script, url])
+            .with_exec(["python", "-c", script, url, *(k for pair in self._LOAD_HEADERS for k in pair)])
             .stdout()
         )
         headers = dict(line.split(": ", 1) for line in out.splitlines() if ": " in line)
