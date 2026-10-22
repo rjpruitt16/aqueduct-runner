@@ -1112,7 +1112,10 @@ print(json.dumps(result))
         ws://canalis:8080/websocket. Canalis picks the node and pipes frames
         without reading them, so every check -- ordering, replay, reconnect,
         live queue positions, the node's own limits, transcript expiry --
-        has to pass through it unchanged.
+        has to pass through it unchanged. The one difference: a client past
+        the node's limit may be held in Canalis's waiting room (Canalis
+        knows the node is full from the capacity it reports) instead of
+        getting the node's 429 (`--gateway`).
 
         Every service is labeled with `case`: Dagger reuses identical
         service definitions, and two cases sharing a Valkey or a backend
@@ -1138,7 +1141,7 @@ print(json.dumps(result))
         script = (
             "for i in $(seq 1 90); do "
             f"[ -n \"$(valkey-cli -h valkey keys 'aqueduct:instance:*:{node_port}')\" ] && break; sleep 1; done; "
-            "/websocket-fixture test --target ws://canalis:8080/websocket --backend ws://backend:6060/socket"
+            "/websocket-fixture test --gateway --target ws://canalis:8080/websocket --backend ws://backend:6060/socket"
         )
         return await (
             dag.container()
