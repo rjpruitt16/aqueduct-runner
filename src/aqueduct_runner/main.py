@@ -516,15 +516,67 @@ class AqueductRunner:
             except json.JSONDecodeError:
                 continue
             if record.get("address", "").startswith("http") and record.get("state") == "active":
-                return f"registration: PASS ({key} -> {record['address']}, state {record['state']})"
+                load = await self._require_load_headers(aquifer, "http://node:8080/health", "Aquifer")
+                return f"registration: PASS ({key} -> {record['address']}, state {record['state']}; {load})"
 
         if "canalis:instance:" in result:
-            return f"registration: PASS (legacy key: {result.strip()})"
+            load = await self._require_load_headers(aquifer, "http://node:8080/health", "Aquifer")
+            return f"registration: PASS (legacy key: {result.strip()}; {load})"
 
         raise RuntimeError(
             "expected an active aqueduct:instance:* record (or a legacy canalis:instance:* key) "
             f"in Valkey after real Aquifer->Canalis registration pings, got: {result!r}"
         )
+
+    # The load Aquifer and Spillway report on every response (and in their
+    # ping), so Canalis can count HTTP users and WebSocket sessions each
+    # against its own capacity: see either one's REGISTRATION.md.
+    _LOAD_HEADERS = (
+        ("x-aqueduct-http-users", "x-aqueduct-http-capacity"),
+        ("x-aqueduct-ws-sessions", "x-aqueduct-ws-capacity"),
+    )
+
+    async def _require_load_headers(self, node: dagger.Service, url: str, name: str) -> str:
+        """Checks a node's response carries its load: all four headers,
+        whole numbers, each capacity at least what's in use, on a 200.
+        Retries for a few seconds, since a node may take one reading before
+        it has any."""
+        script = (
+            "import sys, time, urllib.request\n"
+            "want = sys.argv[2:]\n"
+            "for _ in range(20):\n"
+            "    try:\n"
+            "        with urllib.request.urlopen(sys.argv[1], timeout=5) as r:\n"
+            "            h = {k.lower(): v for k, v in r.headers.items()}\n"
+            "    except OSError as e:\n"
+            "        h = {'error': str(e)}\n"
+            "    if all(k in h for k in want):\n"
+            "        break\n"
+            "    time.sleep(0.5)\n"
+            "for k, v in sorted(h.items()):\n"
+            "    if k.startswith('x-aqueduct-'):\n"
+            "        print(f'{k}: {v}')\n"
+            "if 'error' in h:\n"
+            "    print(f\"error: {h['error']}\")\n"
+        )
+        out = await (
+            dag.container()
+            .from_("python:3.12-alpine")
+            .with_service_binding("node", node)
+            .with_exec(["python", "-c", script, url, *(k for pair in self._LOAD_HEADERS for k in pair)])
+            .stdout()
+        )
+        headers = dict(line.split(": ", 1) for line in out.splitlines() if ": " in line)
+        report = []
+        for used_name, capacity_name in self._LOAD_HEADERS:
+            try:
+                used, capacity = int(headers[used_name]), int(headers[capacity_name])
+            except (KeyError, ValueError):
+                raise RuntimeError(f"expected {used_name} and {capacity_name} as numbers on {name}'s {url}, got: {out!r}")
+            if used < 0 or capacity < used:
+                raise RuntimeError(f"{name} reported {capacity_name} {capacity} below {used_name} {used}")
+            report.append(f"{used}/{capacity}")
+        return f"load http {report[0]}, ws {report[1]}"
 
     def build_spillway_registration(self, source: dagger.Directory) -> Container:
         """Spillway's own image, pinging the "canalis" service alias every
@@ -596,7 +648,8 @@ class AqueductRunner:
         records = await self._canalis_records(valkey, canalis, {"spillway": spillway}, expect=1)
         for record in records:
             if record.get("address", "").endswith(":4000") and record.get("state") == "active":
-                return f"spillway registration: PASS ({record['id']} -> {record['address']}, state active)"
+                load = await self._require_load_headers(spillway, "http://node:4000/health", "Spillway")
+                return f"spillway registration: PASS ({record['id']} -> {record['address']}, state active; {load})"
         raise RuntimeError(f"expected an active Spillway (port 4000) record in Canalis's table, got: {records!r}")
 
     # Test-only L8 keys (Go's 64-byte ed25519 format, which Aquifer and
