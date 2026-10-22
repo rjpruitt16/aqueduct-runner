@@ -417,10 +417,12 @@ class AqueductRunner:
         fails with a diff on any other difference.
         """
         # internal/cluster/valkey.go since aquifer#117; cluster_valkey.go before.
+        go_path = "internal/cluster/valkey.go"
         try:
-            go = await aquifer_source.file("internal/cluster/valkey.go").contents()
+            go = await aquifer_source.file(go_path).contents()
         except dagger.QueryError:
-            go = await aquifer_source.file("cluster_valkey.go").contents()
+            go_path = "cluster_valkey.go"
+            go = await aquifer_source.file(go_path).contents()
         rust = await canalis_source.file("src/assign.rs").contents()
 
         pairs = [
@@ -439,7 +441,7 @@ class AqueductRunner:
             a, c = _lua_lines(aquifer_lua), _lua_lines(canalis_lua)
             if a != c:
                 diff = "\n".join(
-                    difflib.unified_diff(a, c, "aquifer/internal/cluster/valkey.go", "canalis-rs/src/assign.rs", lineterm="")
+                    difflib.unified_diff(a, c, f"aquifer/{go_path}", "canalis-rs/src/assign.rs", lineterm="")
                 )
                 raise RuntimeError(f"the {name} script differs between Aquifer and Canalis:\n{diff}")
         return "claim-script: PASS (claim and release scripts match)"
