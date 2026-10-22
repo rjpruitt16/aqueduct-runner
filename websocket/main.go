@@ -156,18 +156,24 @@ type contractClient struct {
 	targetURL  string
 	backendURL string
 	dialer     websocket.Dialer
+	// Behind a gateway (Canalis) that knows the node is full, a client past
+	// the node's limit may be held in the gateway's waiting room instead
+	// of reaching the node and getting its 429.
+	gateway bool
 }
 
 func runContract(args []string) error {
 	flags := flag.NewFlagSet("test", flag.ContinueOnError)
 	targetURL := flags.String("target", "ws://target:8080/websocket", "WebSocket endpoint under test")
 	backendURL := flags.String("backend", "ws://backend:6060/socket", "fixture backend endpoint")
+	gateway := flags.Bool("gateway", false, "the target is a gateway in front of the node (see contractClient.gateway)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	c := &contractClient{
 		targetURL:  *targetURL,
 		backendURL: *backendURL,
+		gateway:    *gateway,
 		dialer: websocket.Dialer{
 			HandshakeTimeout: 5 * time.Second,
 			Subprotocols:     []string{subprotocol},
@@ -397,6 +403,19 @@ func (c *contractClient) testPerNodeLimits() error {
 	}
 
 	fourth, response, err := c.dial("runner-limit-4", "0-0", "hold")
+	if err == nil && c.gateway {
+		// Held by the gateway: it says so, and leaves the node alone.
+		waitErr := waitForStatus(fourth, "canalis_waiting", 5*time.Second)
+		closeSocket(fourth)
+		if waitErr != nil {
+			first.Close()
+			second.Close()
+			third.Close()
+			return fmt.Errorf("fourth client was neither rejected with 429 nor held by the gateway: %w", waitErr)
+		}
+		time.Sleep(200 * time.Millisecond)
+		return c.finishPerNodeLimits(first, second, third)
+	}
 	if fourth != nil {
 		fourth.Close()
 	}
@@ -413,7 +432,12 @@ func (c *contractClient) testPerNodeLimits() error {
 		return errors.New("429 response did not include Retry-After")
 	}
 	response.Body.Close()
+	return c.finishPerNodeLimits(first, second, third)
+}
 
+// The rest of testPerNodeLimits, once a client past the limit was turned
+// away: the queue advances as places free up.
+func (c *contractClient) finishPerNodeLimits(first, second, third *websocket.Conn) error {
 	closeSocket(second)
 	if err := waitForWaitingPosition(third, 1, 5*time.Second); err != nil {
 		first.Close()
